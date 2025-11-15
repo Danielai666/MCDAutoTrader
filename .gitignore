@@ -14,3 +14,9 @@ build/
 *.db-*
 bot.db
 bot.db-*
+
+# local db
+*.db
+*.db-*
+bot.db
+bot.db-*
