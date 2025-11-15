@@ -10,3 +10,7 @@ build/
 .vscode/
 *.log
 *.sqlite*
+*.db
+*.db-*
+bot.db
+bot.db-*
