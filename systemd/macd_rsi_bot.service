@@ -1,0 +1,12 @@
+[Unit]
+Description=MACD/RSI Divergence Telegram Bot
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/opt/macd_rsi_bot
+ExecStart=/opt/macd_rsi_bot/.venv/bin/python /opt/macd_rsi_bot/main.py
+Environment="PYTHONUNBUFFERED=1"
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
