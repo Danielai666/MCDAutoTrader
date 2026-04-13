@@ -47,7 +47,7 @@ async def _compute_signals(pair: str = None) -> Dict:
     sigs = {}
     for tf in SETTINGS.TIMEFRAMES:
         df = fetch_ohlcv(pair, tf, SETTINGS.CANDLE_LIMIT)
-        sigs[tf] = tf_signal(df)
+        sigs[tf] = tf_signal(df, symbol=pair, timeframe=tf)
     merged = merge_mtf(sigs)
     breakdown = build_score_breakdown(sigs, merged)
     return {'pair': pair, 'by_tf': sigs, 'merged': merged, 'breakdown': breakdown}

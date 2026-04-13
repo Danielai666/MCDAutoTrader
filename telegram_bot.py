@@ -895,6 +895,33 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from validators import run_all_checks
     await update.message.reply_text(run_all_checks(SETTINGS), reply_markup=back_keyboard())
 
+async def divzones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show divergence radar zones. Usage: /divzones [timeframe]"""
+    from div_radar import full_radar_scan, format_radar_report, format_radar_brief
+    from exchange import fetch_ohlcv
+    from pair_manager import get_active_pairs
+    msg = await update.message.reply_text("Scanning divergence zones...")
+    tf_filter = context.args[0] if context.args else None
+    pairs = get_active_pairs()
+    tfs = [tf_filter] if tf_filter else list(SETTINGS.TIMEFRAMES)
+    zones = full_radar_scan(pairs, tfs, fetch_ohlcv)
+    if tf_filter:
+        txt = format_radar_brief(zones, tf_filter)
+    else:
+        txt = format_radar_report(zones)
+    await msg.edit_text(txt, reply_markup=back_keyboard())
+
+async def divradar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full divergence radar scan across all pairs and timeframes."""
+    from div_radar import full_radar_scan, format_radar_report
+    from exchange import fetch_ohlcv
+    from pair_manager import get_active_pairs
+    msg = await update.message.reply_text("Running full divergence radar...")
+    pairs = get_active_pairs()
+    zones = full_radar_scan(pairs, list(SETTINGS.TIMEFRAMES), fetch_ohlcv)
+    txt = format_radar_report(zones, max_zones=15)
+    await msg.edit_text(txt, reply_markup=back_keyboard())
+
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = fetchone("SELECT action, side, confidence, source, fusion_policy, ts FROM ai_decisions ORDER BY id DESC LIMIT 1")
     if row:
@@ -1006,6 +1033,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("blocked", blocked_cmd))
     app.add_handler(CommandHandler("capital", capital_cmd))
     app.add_handler(CommandHandler("maxexposure", maxexposure_cmd))
+    app.add_handler(CommandHandler("divzones", divzones_cmd))
+    app.add_handler(CommandHandler("divradar", divradar_cmd))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))

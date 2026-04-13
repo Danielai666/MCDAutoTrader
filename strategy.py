@@ -5,7 +5,7 @@ from indicators import macd, rsi, stochastic, ema_pair, vol_ma, atr, adx, bollin
 from divergence import detect_divergence, detect_hidden_divergence
 
 
-def tf_signal(df: pd.DataFrame) -> dict:
+def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
     close = df['close']; high = df['high']; low = df['low']; vol = df['volume']
 
     # --- compute all indicators ---
@@ -41,13 +41,21 @@ def tf_signal(df: pd.DataFrame) -> dict:
         from market_regime import detect_regime
         regime_result = detect_regime(df)
 
+    # --- divergence radar zones ---
+    radar_zones = []
+    try:
+        from div_radar import scan_divergence_zones
+        radar_zones = scan_divergence_zones(df, symbol=symbol, timeframe=timeframe)
+    except Exception:
+        pass
+
     # --- ADX trend filter ---
     cur_adx = float(adx_line.iloc[-1])
     if cur_adx < SETTINGS.ADX_TREND_MIN:
         return _build_result(
             'HOLD', 0, f'ADX {cur_adx:.1f} < {SETTINGS.ADX_TREND_MIN} (choppy)',
             close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
-            candle_summary, regime_result
+            candle_summary, regime_result, radar_zones=radar_zones
         )
 
     # --- weighted scoring ---
@@ -134,6 +142,23 @@ def tf_signal(df: pd.DataFrame) -> dict:
             sell_score += min(0.75, abs(net) * 0.5); reasons.append(f'Candle bearish ({net:.2f})')
             components.append({'name': 'candles', 'direction': 'bearish', 'weight': round(min(0.75, abs(net) * 0.5), 3)})
 
+    # 9. Divergence radar zones (weight up to 2.0 for confirmed)
+    if radar_zones:
+        best_bull = [z for z in radar_zones if z.direction == 'bullish']
+        best_bear = [z for z in radar_zones if z.direction == 'bearish']
+        if best_bull:
+            z = best_bull[0]
+            w = z.probability * 2.0  # up to 2.0 for confirmed zones
+            buy_score += w
+            reasons.append(f'DivRadar bull [{z.stage}] p={z.probability:.0%}')
+            components.append({'name': 'div_radar', 'direction': 'bullish', 'weight': round(w, 3), 'stage': z.stage})
+        if best_bear:
+            z = best_bear[0]
+            w = z.probability * 2.0
+            sell_score += w
+            reasons.append(f'DivRadar bear [{z.stage}] p={z.probability:.0%}')
+            components.append({'name': 'div_radar', 'direction': 'bearish', 'weight': round(w, 3), 'stage': z.stage})
+
     # --- direction decision (threshold 1.5) ---
     direction = 'HOLD'
     score = buy_score - sell_score
@@ -143,7 +168,7 @@ def tf_signal(df: pd.DataFrame) -> dict:
     return _build_result(
         direction, score, ', '.join(reasons),
         close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
-        candle_summary, regime_result, components
+        candle_summary, regime_result, components, radar_zones=radar_zones
     )
 
 
@@ -154,7 +179,7 @@ def _bb_pos(price, upper, lower):
 
 
 def _build_result(direction, score, reasons, close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
-                  candle_summary=None, regime_result=None, components=None):
+                  candle_summary=None, regime_result=None, components=None, radar_zones=None):
     snapshot = {
         'macd': float(mline.iloc[-1]), 'rsi': float(r.iloc[-1]),
         'stoch_k': float(k.iloc[-1]), 'stoch_d': float(d.iloc[-1]),
@@ -166,6 +191,8 @@ def _build_result(direction, score, reasons, close, mline, r, k, d, e9, e21, a, 
         snapshot['candles'] = candle_summary
     if regime_result:
         snapshot['regime'] = regime_result.to_dict()
+    if radar_zones:
+        snapshot['div_radar'] = [z.to_dict() for z in radar_zones[:5]]
 
     result = {
         'direction': direction, 'score': score,
