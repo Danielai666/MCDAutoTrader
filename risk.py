@@ -4,7 +4,7 @@ import time
 import json
 import logging
 from config import SETTINGS
-from storage import fetchall, fetchone, execute
+from storage import fetchall, fetchone, execute, upsert_bot_state
 
 log = logging.getLogger(__name__)
 
@@ -407,13 +407,10 @@ def get_equity_status() -> dict:
     peak_equity = float(peak_row[0]) if peak_row and peak_row[0] else SETTINGS.CAPITAL_USD
 
     # Update peak if new high
+    now = int(time.time())
     if equity > peak_equity:
         peak_equity = equity
-        execute(
-            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('peak_equity', str(round(peak_equity, 2)), int(time.time()))
-        )
+        upsert_bot_state('peak_equity', str(round(peak_equity, 2)), now)
 
     # Current drawdown
     drawdown_usd = peak_equity - equity
@@ -424,18 +421,10 @@ def get_equity_status() -> dict:
     max_dd = float(max_dd_row[0]) if max_dd_row and max_dd_row[0] else 0.0
     if drawdown_pct > max_dd:
         max_dd = drawdown_pct
-        execute(
-            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('max_drawdown_pct', str(round(max_dd, 4)), int(time.time()))
-        )
+        upsert_bot_state('max_drawdown_pct', str(round(max_dd, 4)), now)
 
     # Save equity snapshot
-    execute(
-        "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-        ('current_equity', str(round(equity, 2)), int(time.time()))
-    )
+    upsert_bot_state('current_equity', str(round(equity, 2)), now)
 
     return {
         'equity': round(equity, 2),

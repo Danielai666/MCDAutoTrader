@@ -1,11 +1,16 @@
 # trade_executor.py
-# Trade helpers + manual guard utilities
+# Trade helpers + manual guard utilities + execution integrity
 
 import time
-from typing import Optional, Tuple
+import logging
+from typing import Optional
 
 from config import SETTINGS
-from storage import execute, fetchone, fetchall, _USE_POSTGRES
+from storage import (execute, fetchone, fetchall, _USE_POSTGRES,
+                     insert_trade, append_trade_note,
+                     upsert_manual_guard, upsert_bot_state)
+
+log = logging.getLogger(__name__)
 
 # -------------------------
 # Trading primitives
@@ -14,20 +19,7 @@ def open_trade(pair: str, side: str, qty: float, price: float,
                reason: str = "", mode: Optional[str] = None,
                entry_snapshot: Optional[str] = None) -> int:
     """Open a new trade. Returns the trade id."""
-    now = int(time.time())
-    if _USE_POSTGRES:
-        row = fetchone(
-            "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, entry_snapshot, trade_type) "
-            "VALUES(?,?,?,?, 'OPEN', ?, ?, 'open', ?, 'auto') RETURNING id",
-            (pair, side.upper(), float(qty), float(price), now, reason or "open_trade", entry_snapshot))
-        return int(row[0]) if row else 0
-    else:
-        execute(
-            "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, entry_snapshot, trade_type) "
-            "VALUES(?,?,?,?, 'OPEN', ?, ?, 'open', ?, 'auto')",
-            (pair, side.upper(), float(qty), float(price), now, reason or "open_trade", entry_snapshot))
-        rowid = fetchone("SELECT last_insert_rowid()")[0]
-        return int(rowid)
+    return insert_trade(pair, side, qty, price, reason, entry_snapshot)
 
 
 def close_all_for_pair(pair: str, reason: str = "") -> int:
@@ -36,23 +28,30 @@ def close_all_for_pair(pair: str, reason: str = "") -> int:
                     (pair, pair.replace('/', '')))
     count = 0
     for (tid,) in rows:
-        execute("UPDATE trades SET status='CLOSED', note=COALESCE(note,'')||? WHERE id=?",
-                (f" | {reason}", tid))
+        append_trade_note(tid, f" | {reason}")
+        execute("UPDATE trades SET status='CLOSED' WHERE id=?", (tid,))
         count += 1
     return count
 
 
-def close_trade(trade_id: int, exit_price: float, reason: str = "", exit_snapshot: Optional[str] = None) -> float:
+def close_trade(trade_id: int, exit_price: float, reason: str = "",
+                exit_snapshot: Optional[str] = None) -> float:
     """Close a single trade by ID. Returns PnL."""
     row = fetchone("SELECT side, qty, entry FROM trades WHERE id=?", (trade_id,))
     if not row:
+        log.warning("close_trade: trade %d not found", trade_id)
         return 0.0
     side, qty, entry = str(row[0]), float(row[1]), float(row[2])
     pnl = (exit_price - entry) * qty if side == "BUY" else (entry - exit_price) * qty
     now = int(time.time())
+
+    if reason:
+        append_trade_note(trade_id, f" | {reason}")
+
     execute(
-        "UPDATE trades SET exit_price=?, pnl=?, status='CLOSED', lifecycle='closed', ts_close=?, note=COALESCE(note,'')||?, exit_snapshot=? WHERE id=?",
-        (exit_price, pnl, now, f" | {reason}" if reason else "", exit_snapshot, trade_id))
+        "UPDATE trades SET exit_price=?, pnl=?, status='CLOSED', lifecycle='closed', "
+        "ts_close=?, exit_snapshot=? WHERE id=?",
+        (exit_price, pnl, now, exit_snapshot, trade_id))
     return pnl
 
 
@@ -68,46 +67,135 @@ def get_open_trades_for_pair(pair: str) -> list:
 
 
 # -------------------------
-# Autonomous execution bridge
+# Autonomous execution bridge — hardened for production
 # -------------------------
+
+# Execution lock to prevent duplicate simultaneous trades
+_execution_lock = {}
+
+
+def _check_execution_lock(pair: str, side: str) -> bool:
+    """Prevent duplicate execution within a short window."""
+    key = f"{pair}:{side}"
+    now = time.time()
+    last = _execution_lock.get(key, 0)
+    if now - last < 10:  # 10-second dedup window
+        log.warning("Execution dedup: %s blocked (last: %.1fs ago)", key, now - last)
+        return False
+    _execution_lock[key] = now
+    return True
+
+
+def _clear_execution_lock(pair: str, side: str):
+    key = f"{pair}:{side}"
+    _execution_lock.pop(key, None)
+
+
 def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
                               sl_price: float, tp_price: float,
                               reason: str = "", entry_snapshot: str = None) -> dict:
     """
     Full trade execution: DB record + exchange order + SL/TP guards.
+    Hardened sequence:
+      1. Dedup check
+      2. Create DB record (status=PENDING)
+      3. Place exchange order
+      4. On success: update DB with order_id, set status=OPEN
+      5. On failure: mark DB record as FAILED
+      6. Set SL/TP guards
     Returns {'success': bool, 'trade_id': int, 'order_id': str, 'mode': str, 'error': str}
     """
-    import logging
-    log = logging.getLogger(__name__)
-
     if SETTINGS.DRY_RUN_MODE:
-        log.info("DRY RUN: %s %s %.6f %s @ %.2f", side, qty, qty, pair, price)
+        log.info("DRY RUN: %s %s %.6f %s @ %.2f (SL=%.2f TP=%.2f)",
+                 side, qty, qty, pair, price, sl_price, tp_price)
         return {'success': True, 'trade_id': 0, 'order_id': 'dry-run', 'mode': 'DRY_RUN', 'error': ''}
 
-    # 1. Create DB record
-    trade_id = open_trade(pair, side, qty, price, reason=reason, entry_snapshot=entry_snapshot)
+    # 1. Dedup check
+    if not _check_execution_lock(pair, side):
+        return {'success': False, 'trade_id': 0, 'order_id': None,
+                'mode': 'DEDUP', 'error': 'Duplicate execution blocked'}
 
-    # 2. Execute on exchange
+    trade_id = 0
     order_id = None
     mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
+
     try:
-        from exchange import place_market_order
-        result = place_market_order(pair, side, qty)
-        order_id = result.get('id', f'paper-{trade_id}')
-        # Store order_id
-        execute("UPDATE trades SET order_id=? WHERE id=?", (str(order_id), trade_id))
+        # 2. Create DB record with PENDING status
+        now = int(time.time())
+        if _USE_POSTGRES:
+            row = fetchone(
+                "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, "
+                "entry_snapshot, trade_type) "
+                "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto') RETURNING id",
+                (pair, side.upper(), float(qty), float(price), now,
+                 reason or "auto_trade", entry_snapshot))
+            trade_id = int(row[0]) if row else 0
+        else:
+            from storage import _sqlite_lock, _get_sqlite_conn
+            with _sqlite_lock:
+                conn = _get_sqlite_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, "
+                    "entry_snapshot, trade_type) "
+                    "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto')",
+                    (pair, side.upper(), float(qty), float(price), now,
+                     reason or "auto_trade", entry_snapshot))
+                conn.commit()
+                trade_id = cur.lastrowid
+
+        if trade_id == 0:
+            log.error("Failed to create trade record for %s %s", side, pair)
+            _clear_execution_lock(pair, side)
+            return {'success': False, 'trade_id': 0, 'order_id': None,
+                    'mode': mode, 'error': 'DB insert failed'}
+
+        log.info("Trade %d created (PENDING): %s %s %.6f %s @ %.2f",
+                 trade_id, mode, side, qty, pair, price)
+
+        # 3. Execute on exchange
+        try:
+            from exchange import place_market_order
+            result = place_market_order(pair, side, qty)
+            order_id = result.get('id', f'paper-{trade_id}')
+
+            # 4. Success: update to OPEN with order_id
+            execute("UPDATE trades SET status='OPEN', lifecycle='open', order_id=? WHERE id=?",
+                    (str(order_id), trade_id))
+            log.info("Trade %d OPEN: order=%s", trade_id, order_id)
+
+        except Exception as e:
+            # 5. Failure: mark as FAILED
+            log.error("Order execution failed for trade %d (%s): %s", trade_id, pair, e)
+            execute("UPDATE trades SET status='FAILED', lifecycle='blocked', note=? WHERE id=?",
+                    (f"Order failed: {e}", trade_id))
+            _clear_execution_lock(pair, side)
+            return {'success': False, 'trade_id': trade_id, 'order_id': None,
+                    'mode': mode, 'error': str(e)}
+
+        # 6. Set SL/TP guards
+        admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
+        if admin_id:
+            try:
+                set_manual_guard(admin_id, pair, sl=sl_price, tp=tp_price)
+            except Exception as e:
+                log.warning("Failed to set guards for trade %d: %s", trade_id, e)
+
+        return {'success': True, 'trade_id': trade_id, 'order_id': order_id,
+                'mode': mode, 'error': ''}
+
     except Exception as e:
-        log.error("Order execution failed for %s: %s", pair, e)
-        execute("UPDATE trades SET status='FAILED', lifecycle='blocked', note=? WHERE id=?",
-                (f"Order failed: {e}", trade_id))
-        return {'success': False, 'trade_id': trade_id, 'order_id': None, 'mode': mode, 'error': str(e)}
-
-    # 3. Set SL/TP guards
-    admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
-    if admin_id:
-        set_manual_guard(admin_id, pair, sl=sl_price, tp=tp_price)
-
-    return {'success': True, 'trade_id': trade_id, 'order_id': order_id, 'mode': mode, 'error': ''}
+        log.exception("Unexpected error in execute_autonomous_trade: %s", e)
+        # If trade_id was created, mark it failed
+        if trade_id > 0:
+            try:
+                execute("UPDATE trades SET status='FAILED', lifecycle='blocked', note=? WHERE id=?",
+                        (f"Unexpected error: {e}", trade_id))
+            except Exception:
+                pass
+        _clear_execution_lock(pair, side)
+        return {'success': False, 'trade_id': trade_id, 'order_id': None,
+                'mode': mode, 'error': str(e)}
 
 
 def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
@@ -115,9 +203,6 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
     Close all open trades for pair, executing on exchange if live.
     Returns {'success': bool, 'closed_count': int, 'total_pnl': float, 'mode': str, 'errors': list}
     """
-    import logging
-    log = logging.getLogger(__name__)
-
     from exchange import market_price, place_market_order
     mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
     errors = []
@@ -127,7 +212,8 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
     try:
         px = market_price(pair)
     except Exception as e:
-        return {'success': False, 'closed_count': 0, 'total_pnl': 0, 'mode': mode, 'errors': [f'Price fetch: {e}']}
+        return {'success': False, 'closed_count': 0, 'total_pnl': 0,
+                'mode': mode, 'errors': [f'Price fetch: {e}']}
 
     trades = get_open_trades_for_pair(pair)
     for t in trades:
@@ -135,7 +221,13 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
             # Execute opposite order on exchange
             opposite = 'sell' if t['side'] == 'BUY' else 'buy'
             if not SETTINGS.PAPER_TRADING:
-                place_market_order(pair, opposite, t['qty'])
+                try:
+                    place_market_order(pair, opposite, t['qty'])
+                except Exception as e:
+                    log.error("Exit order failed for trade %s: %s", t['id'], e)
+                    errors.append(f"Trade #{t['id']} order failed: {e}")
+                    # Still close in DB to avoid orphaned state
+                    append_trade_note(t['id'], f" | EXIT_ORDER_FAILED: {e}")
 
             pnl = close_trade(t['id'], px, reason)
             total_pnl += pnl
@@ -144,12 +236,23 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
             log.error("Exit failed for trade %s: %s", t['id'], e)
             errors.append(f"Trade #{t['id']}: {e}")
 
-    # Clear guards
+    # Clear guards and ATR trail state
     admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
     if admin_id:
-        clear_manual_guard(admin_id, pair, 'all')
+        try:
+            clear_manual_guard(admin_id, pair, 'all')
+        except Exception:
+            pass
 
-    return {'success': len(errors) == 0, 'closed_count': closed, 'total_pnl': total_pnl, 'mode': mode, 'errors': errors}
+    # Clean ATR trailing state for closed trades
+    for t in trades:
+        try:
+            execute("DELETE FROM bot_state WHERE key=?", (f"atr_trail_{t['id']}",))
+        except Exception:
+            pass
+
+    return {'success': len(errors) == 0, 'closed_count': closed,
+            'total_pnl': total_pnl, 'mode': mode, 'errors': errors}
 
 
 # -------------------------
@@ -179,16 +282,8 @@ def set_manual_guard(uid: int, pair: str, sl: Optional[float] = None,
         new_stop = old_stop
         new_hwm  = old_hwm
 
-    return execute("""
-        INSERT INTO manual_guards(user_id, pair, stop_loss, take_profit, trail_pct, trail_stop, high_watermark)
-        VALUES(?,?,?,?,?,?,?)
-        ON CONFLICT(user_id, pair) DO UPDATE SET
-            stop_loss=excluded.stop_loss,
-            take_profit=excluded.take_profit,
-            trail_pct=excluded.trail_pct,
-            trail_stop=excluded.trail_stop,
-            high_watermark=excluded.high_watermark
-    """, (uid, pair, new_sl, new_tp, new_trail, new_stop, new_hwm))
+    upsert_manual_guard(uid, pair, new_sl, new_tp, new_trail, new_stop, new_hwm)
+    return 1
 
 
 def clear_manual_guard(uid: int, pair: str, which: str) -> int:
@@ -207,3 +302,34 @@ def clear_manual_guard(uid: int, pair: str, which: str) -> int:
         f"UPDATE manual_guards SET {', '.join(cols)} WHERE user_id=? AND pair IN (?,?)",
         (uid, pair, pair.replace('/', ''))
     )
+
+
+# -------------------------
+# Trade state recovery (for restart safety)
+# -------------------------
+def recover_pending_trades():
+    """
+    On startup, find trades stuck in PENDING status (crash during execution).
+    Mark them as FAILED so they don't block future trading.
+    """
+    rows = fetchall("SELECT id, pair, side, ts_open FROM trades WHERE status='PENDING'")
+    if not rows:
+        return 0
+    count = 0
+    for tid, pair, side, ts_open in rows:
+        age = int(time.time()) - (ts_open or 0)
+        log.warning("Recovering PENDING trade %d (%s %s) — age %ds, marking FAILED",
+                     tid, pair, side, age)
+        execute("UPDATE trades SET status='FAILED', lifecycle='blocked', "
+                "note='Recovered from PENDING on restart' WHERE id=?", (tid,))
+        count += 1
+    return count
+
+
+def get_trade_state_summary() -> dict:
+    """Get summary of current trade states for health checks."""
+    summary = {}
+    for status in ['OPEN', 'PENDING', 'CLOSED', 'FAILED']:
+        row = fetchone("SELECT COUNT(*) FROM trades WHERE status=?", (status,))
+        summary[status.lower()] = int(row[0]) if row else 0
+    return summary

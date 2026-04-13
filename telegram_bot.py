@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import SETTINGS
-from storage import execute, fetchone, fetchall
+from storage import execute, fetchone, fetchall, upsert_bot_state, upsert_user
 from trade_executor import close_all_for_pair, set_manual_guard, clear_manual_guard
 from scheduler import schedule_jobs
 
@@ -79,6 +79,8 @@ def admin_keyboard():
         [InlineKeyboardButton("🏥 Health", callback_data="cmd_health"),
          InlineKeyboardButton("🧠 AI Status", callback_data="cmd_ai")],
         [InlineKeyboardButton("🔴 Kill Switch", callback_data="cmd_killswitch")],
+        [InlineKeyboardButton("🔍 Reconcile", callback_data="cmd_reconcile"),
+         InlineKeyboardButton("🚀 Live Ready?", callback_data="cmd_liveready")],
         [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
     ])
 
@@ -231,11 +233,7 @@ def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
 
         if result['active'] and result['trail_stop'] is not None:
             # Persist updated trail stop
-            execute(
-                "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-                (trail_key, str(result['trail_stop']), int(time.time()))
-            )
+            upsert_bot_state(trail_key, str(result['trail_stop']), int(time.time()))
 
             # Check if triggered
             if is_atr_trail_triggered(price, result['trail_stop'], side):
@@ -678,6 +676,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
 
+    elif data == "cmd_reconcile":
+        if admin_only(uid):
+            await query.edit_message_text("Running reconciliation...")
+            from reconcile import reconcile_positions, format_reconcile_report
+            report = reconcile_positions()
+            txt = format_reconcile_report(report)
+            await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+        else:
+            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+
+    elif data == "cmd_liveready":
+        if admin_only(uid):
+            await query.edit_message_text("Running live-readiness check...")
+            from reconcile import check_live_readiness, format_readiness_report
+            result = check_live_readiness()
+            txt = format_readiness_report(result)
+            await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+        else:
+            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+
 # ---------------------------
 # Text handler for pending input (SL/TP/Trail values)
 # ---------------------------
@@ -739,10 +757,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or ""
-    execute(
-        "INSERT INTO users(user_id,tg_username,trial_start_ts) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING",
-        (uid, uname, int(time.time())),
-    )
+    upsert_user(uid, uname, int(time.time()))
     await update.message.reply_text(
         "👋 Welcome to MCDAutoTrader!\n\n"
         "Tap the menu below to get started:",
@@ -949,9 +964,7 @@ async def capital_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     import config
     config.SETTINGS.CAPITAL_USD = val
-    execute("INSERT INTO bot_state(key,value,updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('capital_usd', str(val), int(time.time())))
+    upsert_bot_state('capital_usd', str(val), int(time.time()))
     await update.message.reply_text(f"Capital set to ${val:,.2f}", reply_markup=back_keyboard())
 
 async def maxexposure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -971,9 +984,7 @@ async def maxexposure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     import config
     config.SETTINGS.MAX_PORTFOLIO_EXPOSURE = val
-    execute("INSERT INTO bot_state(key,value,updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('max_portfolio_exposure', str(val), int(time.time())))
+    upsert_bot_state('max_portfolio_exposure', str(val), int(time.time()))
     await update.message.reply_text(f"Max exposure: {val*100:.0f}% (${SETTINGS.CAPITAL_USD * val:,.2f})", reply_markup=back_keyboard())
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1031,43 +1042,101 @@ async def blocked_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = int(context.args[0]) if context.args else 7
     await update.message.reply_text(blocked_trades_summary(days), reply_markup=back_keyboard())
 
+
+async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run exchange reconciliation. Usage: /reconcile [fix]"""
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.")
+        return
+    await update.message.reply_text("Running reconciliation...")
+    from reconcile import reconcile_positions, auto_fix_issues, format_reconcile_report
+    report = reconcile_positions()
+
+    # Auto-fix if requested
+    if context.args and context.args[0].lower() == 'fix':
+        actions = auto_fix_issues(report)
+        report['actions_taken'] = actions
+
+    txt = format_reconcile_report(report)
+    await update.message.reply_text(txt, reply_markup=back_keyboard())
+
+
+async def liveready_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run live-readiness check. Usage: /liveready"""
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.")
+        return
+    await update.message.reply_text("Running live-readiness check...")
+    from reconcile import check_live_readiness, format_readiness_report
+    result = check_live_readiness()
+    txt = format_readiness_report(result)
+    await update.message.reply_text(txt, reply_markup=back_keyboard())
+
+
 # ---------------------------
 # Startup validation
 # ---------------------------
 async def post_init(application):
-    """Run on bot startup: validate config, seed pairs, notify admin."""
+    """
+    Idempotent startup sequence:
+    1. Initialize DB
+    2. Seed default pair
+    3. Recover persisted config
+    4. Recover stuck PENDING trades
+    5. Validate state
+    6. Notify admins
+    """
     from storage import init_db
     from validators import run_all_checks
     from pair_manager import seed_default_pair
+    from trade_executor import recover_pending_trades, get_trade_state_summary
 
+    # 1. DB init (idempotent — CREATE IF NOT EXISTS)
     init_db()
+
+    # 2. Seed default pair (idempotent — upsert)
     seed_default_pair()
 
-    # Recover persisted config from bot_state
+    # 3. Recover persisted config from bot_state
     import config
     for key, attr in [('capital_usd', 'CAPITAL_USD'), ('max_portfolio_exposure', 'MAX_PORTFOLIO_EXPOSURE')]:
         row = fetchone("SELECT value FROM bot_state WHERE key=?", (key,))
         if row and row[0]:
             try:
                 setattr(config.SETTINGS, attr, float(row[0]))
+                log.info("Recovered config %s = %s from bot_state", attr, row[0])
             except Exception:
                 pass
 
-    # Store startup time
+    # 4. Recover trades stuck in PENDING (from crash during execution)
+    recovered = recover_pending_trades()
+    if recovered > 0:
+        log.warning("Recovered %d PENDING trades on startup", recovered)
+
+    # 5. Record startup and trade state
+    now = int(time.time())
     try:
-        execute(
-            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('last_startup', str(int(time.time())), int(time.time()))
-        )
+        upsert_bot_state('last_startup', str(now), now)
+        trade_state = get_trade_state_summary()
+        upsert_bot_state('startup_trade_state', str(trade_state), now)
     except Exception:
         pass
 
-    # Send startup summary to admins
+    # 6. Notify admins with startup summary
     summary = run_all_checks(SETTINGS)
+    startup_lines = [f"Bot Started\n", summary]
+    if recovered > 0:
+        startup_lines.append(f"\nRecovered {recovered} PENDING trade(s) from crash.")
+    trade_state = get_trade_state_summary()
+    if trade_state.get('open', 0) > 0:
+        startup_lines.append(f"\nOpen trades: {trade_state['open']}")
+
+    startup_msg = "\n".join(startup_lines)
     for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
         try:
-            await application.bot.send_message(chat_id=aid, text=f"🟢 Bot Started\n\n{summary}")
+            await application.bot.send_message(chat_id=aid, text=startup_msg)
         except Exception as e:
             log.warning("Startup notify failed for %s: %s", aid, e)
 
@@ -1120,6 +1189,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("maxexposure", maxexposure_cmd))
     app.add_handler(CommandHandler("divzones", divzones_cmd))
     app.add_handler(CommandHandler("divradar", divradar_cmd))
+
+    # --- Production hardening commands ---
+    app.add_handler(CommandHandler("reconcile", reconcile_cmd))
+    app.add_handler(CommandHandler("liveready", liveready_cmd))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))

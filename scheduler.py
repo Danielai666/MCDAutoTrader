@@ -12,7 +12,7 @@ from risk import (can_enter_enhanced, position_size, atr_stop_loss, atr_take_pro
                   is_atr_trail_triggered, get_equity_status, drawdown_position_scale)
 from trade_executor import (open_trade, close_all_for_pair, set_manual_guard,
                              execute_autonomous_trade, execute_autonomous_exit)
-from storage import execute, fetchall, fetchone
+from storage import execute, fetchall, fetchone, upsert_bot_state
 from telegram.ext import Application
 
 log = logging.getLogger(__name__)
@@ -279,16 +279,9 @@ async def run_cycle_once(app: Application, notify: bool = True, pair: str = None
 async def _health_check_job(app: Application):
     try:
         ex_ok, ex_msg = health_check()
-        execute(
-            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('health_exchange', 'OK' if ex_ok else ex_msg, int(time.time()))
-        )
-        execute(
-            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
-            ('last_health_check', str(int(time.time())), int(time.time()))
-        )
+        now = int(time.time())
+        upsert_bot_state('health_exchange', 'OK' if ex_ok else ex_msg, now)
+        upsert_bot_state('last_health_check', str(now), now)
         if not ex_ok:
             for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
                 try:
@@ -315,14 +308,31 @@ async def _daily_report_job(app: Application):
 # -------------------------------------------------------------------
 # Schedule all jobs
 # -------------------------------------------------------------------
+_jobs_scheduled = False
+
 def schedule_jobs(app: Application):
+    """Register scheduled jobs. Idempotent — safe to call multiple times."""
+    global _jobs_scheduled
+    if _jobs_scheduled:
+        log.warning("schedule_jobs called again — skipping duplicate registration")
+        return
+    _jobs_scheduled = True
+
     jq = app.job_queue
+
+    # Remove any existing jobs with same names (safety for restarts)
+    for name in ["analysis_cycle", "health_check", "daily_report"]:
+        existing = jq.get_jobs_by_name(name)
+        for j in existing:
+            j.schedule_removal()
+            log.info("Removed stale job: %s", name)
 
     async def analysis_job(ctx):
         async def _run():
             try:
                 await run_cycle_once(app, notify=True)
             except Exception as e:
+                log.exception("Analysis cycle error: %s", e)
                 for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
                     try:
                         await app.bot.send_message(chat_id=aid, text=f'Scheduler error: {e}')
@@ -330,14 +340,18 @@ def schedule_jobs(app: Application):
                         pass
         await _with_lock('analysis', _run())
 
-    jq.run_repeating(analysis_job, interval=SETTINGS.ANALYSIS_INTERVAL_SECONDS, first=5, name="analysis_cycle")
+    jq.run_repeating(analysis_job, interval=SETTINGS.ANALYSIS_INTERVAL_SECONDS,
+                     first=10, name="analysis_cycle")
 
     async def health_job(ctx):
         await _with_lock('health', _health_check_job(app))
 
-    jq.run_repeating(health_job, interval=SETTINGS.HEALTH_CHECK_INTERVAL_SECONDS, first=60, name="health_check")
+    jq.run_repeating(health_job, interval=SETTINGS.HEALTH_CHECK_INTERVAL_SECONDS,
+                     first=60, name="health_check")
 
     async def daily_job(ctx):
         await _daily_report_job(app)
 
     jq.run_repeating(daily_job, interval=86400, first=3600, name="daily_report")
+    log.info("Scheduler jobs registered: analysis=%ds, health=%ds, daily=86400s",
+             SETTINGS.ANALYSIS_INTERVAL_SECONDS, SETTINGS.HEALTH_CHECK_INTERVAL_SECONDS)

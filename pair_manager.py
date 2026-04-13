@@ -135,9 +135,5 @@ def get_best_tradable_pairs(max_pairs: int = None) -> list:
 
 def seed_default_pair():
     """Ensure the default SETTINGS.PAIR exists in trading_pairs table."""
-    existing = fetchone("SELECT pair FROM trading_pairs WHERE pair=?", (SETTINGS.PAIR,))
-    if not existing:
-        execute(
-            "INSERT INTO trading_pairs(pair, is_active, added_ts) VALUES(?,1,?)",
-            (SETTINGS.PAIR, int(time.time()))
-        )
+    from storage import upsert_trading_pair
+    upsert_trading_pair(SETTINGS.PAIR, 1, int(time.time()))

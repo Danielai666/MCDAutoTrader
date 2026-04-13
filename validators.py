@@ -82,13 +82,11 @@ def validate_telegram(settings) -> tuple:
 
 
 def validate_db(settings) -> tuple:
-    """Check DB_PATH is accessible and tables exist."""
+    """Check DB is accessible and tables exist."""
     try:
-        from storage import init_db, fetchone
-        init_db()
-        row = fetchone("SELECT COUNT(*) FROM users")
-        count = row[0] if row else 0
-        return True, f'DB OK ({count} users)'
+        from storage import check_db_health
+        ok, msg, details = check_db_health()
+        return ok, msg
     except Exception as e:
         return False, f'DB check failed: {e}'
 
@@ -136,6 +134,20 @@ def run_all_checks(settings) -> str:
     if settings.FEATURE_HIDDEN_DIVERGENCE: flags.append('hidden-div')
     if settings.FEATURE_MARKET_REGIME: flags.append('market-regime')
     lines.append(f'Features: {", ".join(flags) if flags else "all defaults"}')
+
+    # Production hardening info
+    lines.append(f'Trailing: {"ATR" if settings.TRAILING_ENABLED else "OFF"}')
+    lines.append(f'Correlation Guard: {"ON" if settings.CORRELATION_CHECK_ENABLED else "OFF"}')
+    lines.append(f'Drawdown Mgmt: {"ON" if settings.DRAWDOWN_TRACKING_ENABLED else "OFF"}')
+    lines.append(f'DB Engine: {settings.DB_ENGINE}')
+
+    # Trade state
+    try:
+        from trade_executor import get_trade_state_summary
+        state = get_trade_state_summary()
+        lines.append(f'Trades: open={state.get("open", 0)} pending={state.get("pending", 0)} failed={state.get("failed", 0)}')
+    except Exception:
+        pass
 
     lines.append('--- End ---')
     return '\n'.join(lines)
