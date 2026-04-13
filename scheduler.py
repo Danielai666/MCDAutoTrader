@@ -8,7 +8,8 @@ from strategy import tf_signal, merge_mtf, build_score_breakdown
 from ai_decider import decide_async
 from risk import (can_enter_enhanced, position_size, atr_stop_loss, atr_take_profit,
                   portfolio_exposure_check, confidence_scaled_position_size,
-                  should_skip_weak_setup)
+                  should_skip_weak_setup, compute_atr_trailing_stop,
+                  is_atr_trail_triggered, get_equity_status, drawdown_position_scale)
 from trade_executor import (open_trade, close_all_for_pair, set_manual_guard,
                              execute_autonomous_trade, execute_autonomous_exit)
 from storage import execute, fetchall, fetchone
@@ -177,13 +178,14 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
         sl = atr_stop_loss(px, atr_val, side)
         tp = atr_take_profit(px, atr_val, side)
 
-        # Entry snapshot
+        # Entry snapshot (includes ATR for trailing stop calculations)
         entry_snapshot = json.dumps({
             'merged': features.get('merged', {}),
             'confidence': dec['confidence'],
             'setup_quality': setup_quality,
             'risk_flags': risk_flags,
             'fusion_policy': fusion.get('policy_used', 'local'),
+            'atr_at_entry': atr_val,
         })
 
         # EXECUTE THE TRADE
@@ -243,7 +245,19 @@ async def run_cycle_once(app: Application, notify: bool = True, pair: str = None
     if autotrade_on:
         action_log = await _execute_autonomous_cycle(app, pair_results)
         actions_txt = "\n".join(action_log) if action_log else "No actions — all HOLD."
+
+        # Append equity/drawdown status
+        try:
+            eq = get_equity_status()
+            dd_scale = drawdown_position_scale()
+            eq_line = (f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%} | "
+                       f"Size scale: {dd_scale:.0%}")
+        except Exception:
+            eq_line = ""
+
         combined = f"{signal_summary}\n\n=== Autonomous Actions ===\n{actions_txt}"
+        if eq_line:
+            combined += f"\n\n{eq_line}"
     else:
         combined = f"{signal_summary}\nAutoTrade: OFF (signal report only)"
 

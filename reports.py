@@ -116,11 +116,26 @@ def daily_report(pair: str = None) -> str:
     pnl = daily_pnl_sum()
     closed = get_recent_closed(n=50, pair=pair)
     today_count = len(closed)  # approximate
+
+    # Include equity & drawdown info
+    equity_lines = ""
+    try:
+        from risk import get_equity_status
+        eq = get_equity_status()
+        equity_lines = (
+            f"\nEquity: {_fmt_usd(eq['equity'])} (peak: {_fmt_usd(eq['peak_equity'])})\n"
+            f"Drawdown: {eq['drawdown_pct']:.1%} ({_fmt_usd(eq['drawdown_usd'])})\n"
+            f"Max Drawdown: {eq['max_drawdown_pct']:.1%}"
+        )
+    except Exception:
+        pass
+
     return (
         f"Daily Summary\n"
         f"PnL Today: {_fmt_usd(pnl)}\n"
         f"Trades Closed: {today_count}\n"
         f"Open Positions: {len(get_open_trades(pair))}"
+        f"{equity_lines}"
     )
 
 

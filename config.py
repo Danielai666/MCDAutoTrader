@@ -108,6 +108,26 @@ class Settings:
     PIVOT_LOOKBACK: int = int(os.getenv('PIVOT_LOOKBACK', '3'))
     ATR_SL_MULTIPLIER: float = float(os.getenv('ATR_SL_MULTIPLIER', '1.5'))
 
+    # --- ATR Trailing Stop ---
+    TRAILING_ENABLED: bool = _bool('TRAILING_ENABLED', 'true')
+    TRAILING_ATR_MULTIPLIER: float = float(os.getenv('TRAILING_ATR_MULTIPLIER', '2.5'))
+    TRAILING_TIGHTEN_AFTER_ATR: float = float(os.getenv('TRAILING_TIGHTEN_AFTER_ATR', '2.0'))
+    TRAILING_TIGHTEN_MULTIPLIER: float = float(os.getenv('TRAILING_TIGHTEN_MULTIPLIER', '1.5'))
+    TRAILING_ACTIVATION_ATR: float = float(os.getenv('TRAILING_ACTIVATION_ATR', '1.0'))
+
+    # --- Correlation Risk ---
+    CORRELATION_CHECK_ENABLED: bool = _bool('CORRELATION_CHECK_ENABLED', 'true')
+    CORRELATION_THRESHOLD: float = float(os.getenv('CORRELATION_THRESHOLD', '0.75'))
+    CORRELATION_LOOKBACK_BARS: int = int(os.getenv('CORRELATION_LOOKBACK_BARS', '50'))
+    CORRELATION_TIMEFRAME: str = os.getenv('CORRELATION_TIMEFRAME', '1h')
+    MAX_CORRELATED_EXPOSURE: int = int(os.getenv('MAX_CORRELATED_EXPOSURE', '2'))
+
+    # --- Drawdown Management ---
+    DRAWDOWN_TRACKING_ENABLED: bool = _bool('DRAWDOWN_TRACKING_ENABLED', 'true')
+    DRAWDOWN_SCALE_THRESHOLD: float = float(os.getenv('DRAWDOWN_SCALE_THRESHOLD', '0.10'))
+    DRAWDOWN_HALT_THRESHOLD: float = float(os.getenv('DRAWDOWN_HALT_THRESHOLD', '0.25'))
+    DRAWDOWN_SCALE_FACTOR: float = float(os.getenv('DRAWDOWN_SCALE_FACTOR', '0.50'))
+
     # --- Candle Patterns ---
     CANDLE_WICK_RATIO: float = float(os.getenv('CANDLE_WICK_RATIO', '2.0'))
     CANDLE_BODY_RATIO: float = float(os.getenv('CANDLE_BODY_RATIO', '0.3'))

@@ -18,6 +18,18 @@ log = logging.getLogger(__name__)
 PAIR_TXT = SETTINGS.PAIR
 PAIR_DB  = PAIR_TXT.replace('/', '')
 
+
+def _drawdown_bar(dd_pct: float) -> str:
+    """Visual drawdown indicator."""
+    if dd_pct < 0.05:
+        return "[OK]"
+    elif dd_pct < SETTINGS.DRAWDOWN_SCALE_THRESHOLD:
+        return "[LOW]"
+    elif dd_pct < SETTINGS.DRAWDOWN_HALT_THRESHOLD:
+        return "[SCALING DOWN]"
+    else:
+        return "[HALTED]"
+
 LAST_NOTIFY = {}
 NOTIFY_COOLDOWN = 300
 
@@ -181,43 +193,106 @@ def _paper_close_all(pair: str, px: float) -> Tuple[int, float]:
         closed += 1
     return closed, total_pnl
 
+def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
+    """
+    Check ATR-based trailing stops for all open trades on this pair.
+    Updates trail stops in DB and returns exit reason if triggered.
+    """
+    from risk import compute_atr_trailing_stop, is_atr_trail_triggered
+    import json as _json
+
+    if not SETTINGS.TRAILING_ENABLED:
+        return None
+
+    rows = fetchall(
+        "SELECT id, side, entry, entry_snapshot FROM trades WHERE status='OPEN' AND pair=?",
+        (pair,)
+    )
+    for tid, side, entry, snapshot_str in rows:
+        entry = float(entry)
+        # Get ATR from entry snapshot
+        atr_val = 0.0
+        if snapshot_str:
+            try:
+                snap = _json.loads(snapshot_str)
+                atr_val = float(snap.get('atr_at_entry', 0))
+            except Exception:
+                pass
+        if atr_val <= 0:
+            continue
+
+        # Get current trail stop from bot_state
+        trail_key = f'atr_trail_{tid}'
+        trail_row = fetchone("SELECT value FROM bot_state WHERE key=?", (trail_key,))
+        current_trail = float(trail_row[0]) if trail_row and trail_row[0] else None
+
+        # Compute new trailing stop
+        result = compute_atr_trailing_stop(entry, price, atr_val, side, current_trail)
+
+        if result['active'] and result['trail_stop'] is not None:
+            # Persist updated trail stop
+            execute(
+                "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+                (trail_key, str(result['trail_stop']), int(time.time()))
+            )
+
+            # Check if triggered
+            if is_atr_trail_triggered(price, result['trail_stop'], side):
+                tighten_txt = " [tightened]" if result['tightened'] else ""
+                return (f"ATR trail stop hit{tighten_txt}: "
+                        f"stop={result['trail_stop']:g} px={price:g} "
+                        f"(profit {result['profit_atr']:.1f}x ATR)")
+
+            # Update trade lifecycle to 'trailing' if active
+            try:
+                from trade_executor import update_trade_lifecycle
+                update_trade_lifecycle(tid, 'trailing')
+            except Exception:
+                pass
+
+    return None
+
+
 async def auto_exit_task(application) -> None:
     admin_id = _get_admin_id()
     pair = SETTINGS.PAIR
     if not admin_id:
         return
 
-    guard = _load_guard(admin_id, pair)
-    if not guard:
-        return
-
     price = _fetch_last_price()
     if not price or price <= 0:
         return
 
+    # --- Check manual guards (SL/TP/trail%) ---
     reason = None
+    guard = _load_guard(admin_id, pair)
+    if guard:
+        sl = guard.get("sl")
+        tp = guard.get("tp")
+        if isinstance(sl, (int, float)) and price <= float(sl):
+            reason = f"SL hit @ {float(sl):g} (px={price:g})"
+        if not reason and isinstance(tp, (int, float)) and price >= float(tp):
+            reason = f"TP hit @ {float(tp):g} (px={price:g})"
 
-    sl = guard.get("sl")
-    tp = guard.get("tp")
-    if isinstance(sl, (int, float)) and price <= float(sl):
-        reason = f"SL hit @ {float(sl):g} (px={price:g})"
-    if not reason and isinstance(tp, (int, float)) and price >= float(tp):
-        reason = f"TP hit @ {float(tp):g} (px={price:g})"
+        trail_pct = guard.get("trail_pct")
+        if not reason and isinstance(trail_pct, (int, float)) and float(trail_pct) > 0:
+            high_wm = guard.get("high_wm")
+            trail_stop = guard.get("trail_stop")
+            updated = False
+            if (high_wm is None) or (price > float(high_wm)):
+                high_wm = float(price)
+                trail_stop = float(high_wm) * (1.0 - float(trail_pct))
+                _save_trailing(admin_id, pair, trail_stop, high_wm)
+                updated = True
+            if trail_stop is not None and price <= float(trail_stop):
+                reason = f"TRAIL stop hit @ {float(trail_stop):g} (px={price:g})"
+            elif updated:
+                log.info("auto-exit: trail updated high=%.6f stop=%.6f", high_wm, trail_stop or -1)
 
-    trail_pct = guard.get("trail_pct")
-    if not reason and isinstance(trail_pct, (int, float)) and float(trail_pct) > 0:
-        high_wm = guard.get("high_wm")
-        trail_stop = guard.get("trail_stop")
-        updated = False
-        if (high_wm is None) or (price > float(high_wm)):
-            high_wm = float(price)
-            trail_stop = float(high_wm) * (1.0 - float(trail_pct))
-            _save_trailing(admin_id, pair, trail_stop, high_wm)
-            updated = True
-        if trail_stop is not None and price <= float(trail_stop):
-            reason = f"TRAIL stop hit @ {float(trail_stop):g} (px={price:g})"
-        elif updated:
-            log.info("auto-exit: trail updated high=%.6f stop=%.6f", high_wm, trail_stop or -1)
+    # --- Check ATR-based trailing stops for open trades ---
+    if not reason:
+        reason = _check_atr_trailing_stops(pair, price)
 
     if not reason:
         return
@@ -241,7 +316,7 @@ async def auto_exit_task(application) -> None:
 
     try:
         lines = [
-            "⚠️ Auto-Exit Triggered",
+            "Auto-Exit Triggered",
             f"Pair: {pair}",
             f"Reason: {reason}",
             f"Price: {price:g}",
@@ -291,20 +366,30 @@ async def _do_status(app, chat_id, uid):
         await app.bot.send_message(chat_id=chat_id, text="Not registered. Use /start.", reply_markup=back_keyboard())
         return
     tier, auto, mode_val, dll, mot = row
-    from risk import portfolio_exposure_check, open_trade_count, trade_count_today, realized_pnl_today
+    from risk import (portfolio_exposure_check, open_trade_count, trade_count_today,
+                      realized_pnl_today, get_equity_status)
     from pair_manager import get_active_pairs
     _, current_exp, remaining = portfolio_exposure_check()
     max_exp = SETTINGS.CAPITAL_USD * SETTINGS.MAX_PORTFOLIO_EXPOSURE
     exp_pct = (current_exp / max_exp * 100) if max_exp > 0 else 0
     pnl_today = realized_pnl_today()
+
+    # Equity & drawdown
+    eq = get_equity_status()
+    dd_bar = _drawdown_bar(eq['drawdown_pct'])
+
     lines = [
-        "📈 Bot Status",
+        "Bot Status",
         "",
-        f"Auto-Trade: {'✅ AUTONOMOUS' if auto else '⛔ OFF'}",
-        f"Mode: {'🔴 LIVE' if mode_val == 'LIVE' else '📝 PAPER'}",
-        f"Kill Switch: {'🔴 ON' if SETTINGS.KILL_SWITCH else '🟢 OFF'}",
+        f"Auto-Trade: {'AUTONOMOUS' if auto else 'OFF'}",
+        f"Mode: {'LIVE' if mode_val == 'LIVE' else 'PAPER'}",
+        f"Kill Switch: {'ON' if SETTINGS.KILL_SWITCH else 'OFF'}",
         "",
-        f"Capital: ${SETTINGS.CAPITAL_USD:,.2f}",
+        f"Equity: ${eq['equity']:,.2f} (peak: ${eq['peak_equity']:,.2f})",
+        f"Drawdown: {eq['drawdown_pct']:.1%} (${eq['drawdown_usd']:,.2f}) {dd_bar}",
+        f"Max Drawdown: {eq['max_drawdown_pct']:.1%}",
+        f"Realized PnL: ${eq['realized_pnl']:,.2f} | Unrealized: ${eq['unrealized_pnl']:,.2f}",
+        "",
         f"Exposure: ${current_exp:,.0f} / ${max_exp:,.0f} ({exp_pct:.0f}%)",
         f"Open Trades: {open_trade_count()}/{mot}",
         "",
@@ -314,8 +399,8 @@ async def _do_status(app, chat_id, uid):
         f"Pairs: {len(get_active_pairs())} active",
         f"Cycle: every {SETTINGS.ANALYSIS_INTERVAL_SECONDS}s",
         f"AI Policy: {SETTINGS.AI_FUSION_POLICY}",
-        f"Min Confidence: {SETTINGS.AI_CONFIDENCE_MIN}",
-        f"Min Quality: {SETTINGS.MIN_SETUP_QUALITY}",
+        f"Trailing: {'ATR' if SETTINGS.TRAILING_ENABLED else 'OFF'}",
+        f"Correlation Guard: {'ON' if SETTINGS.CORRELATION_CHECK_ENABLED else 'OFF'}",
     ]
     await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
 

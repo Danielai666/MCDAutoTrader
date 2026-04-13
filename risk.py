@@ -132,7 +132,21 @@ def can_enter_enhanced(pair: str, side: str, signal_snapshot: dict = None) -> tu
         _log_blocked(pair, side, f'Duplicate {side} on {pair}', signal_snapshot)
         return False, f'Duplicate {side} already open on {pair}'
 
-    # 8. Dry run mode (allow but flag)
+    # 8. Correlation risk check
+    corr_ok, corr_reason, corr_pairs = check_correlation_risk(pair, side)
+    if not corr_ok:
+        _log_blocked(pair, side, corr_reason, signal_snapshot)
+        return False, corr_reason
+
+    # 9. Drawdown halt check
+    dd_scale = drawdown_position_scale()
+    if dd_scale <= 0.0:
+        status = get_equity_status()
+        reason = f"Drawdown halt ({status['drawdown_pct']:.1%} >= {SETTINGS.DRAWDOWN_HALT_THRESHOLD:.0%})"
+        _log_blocked(pair, side, reason, signal_snapshot)
+        return False, reason
+
+    # 10. Dry run mode (allow but flag)
     if SETTINGS.DRY_RUN_MODE:
         return True, 'DRY RUN - would trade'
 
@@ -201,7 +215,9 @@ def confidence_scaled_position_size(price: float, atr_value: float,
     conf_normalized = max(0, min(1, (confidence - SETTINGS.AI_CONFIDENCE_MIN) / conf_range))
     conf_factor = SETTINGS.CONFIDENCE_SCALE_MIN + conf_normalized * (SETTINGS.CONFIDENCE_SCALE_MAX - SETTINGS.CONFIDENCE_SCALE_MIN)
     quality_bonus = min(1.2, 1.0 + setup_quality * 0.2)
-    scaled_qty = base_qty * conf_factor * quality_bonus
+    # Apply drawdown scaling
+    dd_scale = drawdown_position_scale()
+    scaled_qty = base_qty * conf_factor * quality_bonus * dd_scale
     max_by_capital = (SETTINGS.CAPITAL_PER_TRADE_PCT * SETTINGS.CAPITAL_USD) / price
     max_by_remaining = remaining_capital / price
     return round(max(0.0, min(scaled_qty, max_by_capital, max_by_remaining)), 6)
@@ -228,3 +244,229 @@ def atr_take_profit(entry_price: float, atr_value: float, side: str = "BUY") -> 
     if side.upper() == "BUY":
         return round(entry_price + distance, 6)
     return round(entry_price - distance, 6)
+
+
+# -------------------------------------------------------------------
+# ATR-based trailing stop
+# -------------------------------------------------------------------
+def compute_atr_trailing_stop(entry_price: float, current_price: float,
+                               atr_value: float, side: str,
+                               current_trail_stop: float = None) -> dict:
+    """
+    Compute ATR-based trailing stop that tightens as profit grows.
+
+    - Activates after price moves TRAILING_ACTIVATION_ATR * ATR in favor.
+    - Initial trail distance: TRAILING_ATR_MULTIPLIER * ATR from high watermark.
+    - After profit exceeds TRAILING_TIGHTEN_AFTER_ATR * ATR, trail tightens
+      to TRAILING_TIGHTEN_MULTIPLIER * ATR.
+
+    Returns: {'active': bool, 'trail_stop': float|None, 'distance_atr': float,
+              'profit_atr': float, 'tightened': bool}
+    """
+    if not SETTINGS.TRAILING_ENABLED or atr_value <= 0:
+        return {'active': False, 'trail_stop': None, 'distance_atr': 0,
+                'profit_atr': 0, 'tightened': False}
+
+    is_buy = side.upper() == "BUY"
+
+    # Profit in ATR units
+    if is_buy:
+        profit_atr = (current_price - entry_price) / atr_value
+    else:
+        profit_atr = (entry_price - current_price) / atr_value
+
+    # Not yet activated
+    if profit_atr < SETTINGS.TRAILING_ACTIVATION_ATR:
+        return {'active': False, 'trail_stop': current_trail_stop,
+                'distance_atr': 0, 'profit_atr': profit_atr, 'tightened': False}
+
+    # Choose trail distance: tighten once profit is large enough
+    tightened = profit_atr >= SETTINGS.TRAILING_TIGHTEN_AFTER_ATR
+    if tightened:
+        trail_distance = atr_value * SETTINGS.TRAILING_TIGHTEN_MULTIPLIER
+    else:
+        trail_distance = atr_value * SETTINGS.TRAILING_ATR_MULTIPLIER
+
+    # Compute new trail stop from current price (high watermark)
+    if is_buy:
+        new_trail = current_price - trail_distance
+        # Trail can only move UP for buys
+        if current_trail_stop is not None and new_trail <= current_trail_stop:
+            new_trail = current_trail_stop
+    else:
+        new_trail = current_price + trail_distance
+        # Trail can only move DOWN for sells
+        if current_trail_stop is not None and new_trail >= current_trail_stop:
+            new_trail = current_trail_stop
+
+    return {
+        'active': True,
+        'trail_stop': round(new_trail, 6),
+        'distance_atr': trail_distance / atr_value,
+        'profit_atr': round(profit_atr, 2),
+        'tightened': tightened,
+    }
+
+
+def is_atr_trail_triggered(current_price: float, trail_stop: float, side: str) -> bool:
+    """Check if price has breached the ATR trailing stop."""
+    if trail_stop is None:
+        return False
+    if side.upper() == "BUY":
+        return current_price <= trail_stop
+    return current_price >= trail_stop
+
+
+# -------------------------------------------------------------------
+# Correlation-aware risk
+# -------------------------------------------------------------------
+def get_correlation(pair_a: str, pair_b: str) -> float:
+    """Compute rolling correlation between two pairs using close prices."""
+    if not SETTINGS.CORRELATION_CHECK_ENABLED:
+        return 0.0
+    try:
+        from exchange import fetch_ohlcv
+        import numpy as np
+        df_a = fetch_ohlcv(pair_a, SETTINGS.CORRELATION_TIMEFRAME, SETTINGS.CORRELATION_LOOKBACK_BARS)
+        df_b = fetch_ohlcv(pair_b, SETTINGS.CORRELATION_TIMEFRAME, SETTINGS.CORRELATION_LOOKBACK_BARS)
+        if df_a is None or df_b is None or len(df_a) < 20 or len(df_b) < 20:
+            return 0.0
+        # Align by length
+        min_len = min(len(df_a), len(df_b))
+        returns_a = df_a['close'].pct_change().dropna().tail(min_len - 1).values
+        returns_b = df_b['close'].pct_change().dropna().tail(min_len - 1).values
+        min_ret = min(len(returns_a), len(returns_b))
+        if min_ret < 10:
+            return 0.0
+        corr = float(np.corrcoef(returns_a[-min_ret:], returns_b[-min_ret:])[0, 1])
+        return corr if not np.isnan(corr) else 0.0
+    except Exception as e:
+        log.warning("Correlation check failed for %s/%s: %s", pair_a, pair_b, e)
+        return 0.0
+
+
+def check_correlation_risk(pair: str, side: str) -> tuple:
+    """
+    Check if entering this pair would create excessive correlated exposure.
+    Returns (allowed: bool, reason: str, correlated_pairs: list).
+    """
+    if not SETTINGS.CORRELATION_CHECK_ENABLED:
+        return True, 'Correlation check disabled', []
+
+    # Get all distinct pairs with open trades
+    rows = fetchall("SELECT DISTINCT pair FROM trades WHERE status='OPEN'")
+    open_pairs = [r[0] for r in rows if r[0] != pair]
+
+    if not open_pairs:
+        return True, 'No open positions to correlate against', []
+
+    correlated = []
+    for op in open_pairs:
+        corr = get_correlation(pair, op)
+        if abs(corr) >= SETTINGS.CORRELATION_THRESHOLD:
+            correlated.append((op, round(corr, 3)))
+
+    if len(correlated) >= SETTINGS.MAX_CORRELATED_EXPOSURE:
+        pairs_str = ', '.join(f'{p}({c:+.2f})' for p, c in correlated)
+        return False, f'High correlation with {len(correlated)} open positions: {pairs_str}', correlated
+
+    return True, 'OK', correlated
+
+
+# -------------------------------------------------------------------
+# Equity & drawdown tracking
+# -------------------------------------------------------------------
+def get_equity_status() -> dict:
+    """
+    Calculate current equity, peak equity, drawdown.
+    Returns: {equity, peak_equity, drawdown_pct, drawdown_usd, max_drawdown_pct}
+    """
+    # Current equity = starting capital + all realized PnL + unrealized PnL
+    realized_row = fetchone("SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='CLOSED'")
+    realized = float(realized_row[0]) if realized_row and realized_row[0] is not None else 0.0
+
+    # Unrealized PnL from open trades
+    open_rows = fetchall("SELECT pair, side, qty, entry FROM trades WHERE status='OPEN'")
+    unrealized = 0.0
+    for pair, side, qty, entry in open_rows:
+        try:
+            from exchange import market_price
+            px = market_price(pair)
+            qty, entry = float(qty), float(entry)
+            if side == 'BUY':
+                unrealized += (px - entry) * qty
+            else:
+                unrealized += (entry - px) * qty
+        except Exception:
+            pass
+
+    equity = SETTINGS.CAPITAL_USD + realized + unrealized
+
+    # Get peak equity from bot_state
+    peak_row = fetchone("SELECT value FROM bot_state WHERE key='peak_equity'")
+    peak_equity = float(peak_row[0]) if peak_row and peak_row[0] else SETTINGS.CAPITAL_USD
+
+    # Update peak if new high
+    if equity > peak_equity:
+        peak_equity = equity
+        execute(
+            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            ('peak_equity', str(round(peak_equity, 2)), int(time.time()))
+        )
+
+    # Current drawdown
+    drawdown_usd = peak_equity - equity
+    drawdown_pct = drawdown_usd / peak_equity if peak_equity > 0 else 0.0
+
+    # Max drawdown (historical)
+    max_dd_row = fetchone("SELECT value FROM bot_state WHERE key='max_drawdown_pct'")
+    max_dd = float(max_dd_row[0]) if max_dd_row and max_dd_row[0] else 0.0
+    if drawdown_pct > max_dd:
+        max_dd = drawdown_pct
+        execute(
+            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            ('max_drawdown_pct', str(round(max_dd, 4)), int(time.time()))
+        )
+
+    # Save equity snapshot
+    execute(
+        "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+        ('current_equity', str(round(equity, 2)), int(time.time()))
+    )
+
+    return {
+        'equity': round(equity, 2),
+        'peak_equity': round(peak_equity, 2),
+        'drawdown_usd': round(drawdown_usd, 2),
+        'drawdown_pct': round(drawdown_pct, 4),
+        'max_drawdown_pct': round(max_dd, 4),
+        'realized_pnl': round(realized, 2),
+        'unrealized_pnl': round(unrealized, 2),
+    }
+
+
+def drawdown_position_scale() -> float:
+    """
+    Returns a scaling factor (0.0 - 1.0) for position sizing based on drawdown.
+    - No drawdown: 1.0 (full size)
+    - Drawdown > DRAWDOWN_SCALE_THRESHOLD: reduced by DRAWDOWN_SCALE_FACTOR
+    - Drawdown > DRAWDOWN_HALT_THRESHOLD: 0.0 (halt trading)
+    """
+    if not SETTINGS.DRAWDOWN_TRACKING_ENABLED:
+        return 1.0
+
+    status = get_equity_status()
+    dd_pct = status['drawdown_pct']
+
+    if dd_pct >= SETTINGS.DRAWDOWN_HALT_THRESHOLD:
+        return 0.0
+    elif dd_pct >= SETTINGS.DRAWDOWN_SCALE_THRESHOLD:
+        # Linear scale between threshold and halt
+        range_pct = SETTINGS.DRAWDOWN_HALT_THRESHOLD - SETTINGS.DRAWDOWN_SCALE_THRESHOLD
+        depth = (dd_pct - SETTINGS.DRAWDOWN_SCALE_THRESHOLD) / range_pct if range_pct > 0 else 1.0
+        return max(0.0, SETTINGS.DRAWDOWN_SCALE_FACTOR * (1.0 - depth) + 0.0 * depth)
+    else:
+        return 1.0
