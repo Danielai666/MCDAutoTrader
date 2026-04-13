@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS signals(
 );
 CREATE TABLE IF NOT EXISTS trades(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts_open INTEGER, ts_close INTEGER,
-    pair TEXT, side TEXT, qty REAL, entry REAL, exit REAL, pnl REAL,
+    pair TEXT, side TEXT, qty REAL, entry REAL, exit_price REAL, pnl REAL,
     status TEXT, note TEXT
 );
 CREATE TABLE IF NOT EXISTS manual_guards(
@@ -105,6 +105,7 @@ def init_db():
     conn.close()
 
 def _migrate_sqlite_trades(conn):
+    # Add new columns if missing
     for col, typedef in [
         ('lifecycle', "TEXT DEFAULT 'open'"),
         ('entry_snapshot', 'TEXT'),
@@ -115,6 +116,11 @@ def _migrate_sqlite_trades(conn):
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")
         except Exception:
             pass
+    # Rename exit -> exit_price if old schema
+    try:
+        conn.execute("ALTER TABLE trades RENAME COLUMN exit TO exit_price")
+    except Exception:
+        pass  # already renamed or column doesn't exist
     conn.commit()
 
 # -------------------------------------------------------------------

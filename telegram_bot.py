@@ -174,7 +174,7 @@ def _paper_close_all(pair: str, px: float) -> Tuple[int, float]:
         qty = float(qty); entry = float(entry)
         pnl = (px - entry) * qty if side == "BUY" else (entry - px) * qty
         execute(
-            "UPDATE trades SET exit=?, pnl=?, status='CLOSED', ts_close=? WHERE id=?",
+            "UPDATE trades SET exit_price=?, pnl=?, status='CLOSED', ts_close=? WHERE id=?",
             (px, pnl, now, tid),
         )
         total_pnl += pnl
@@ -638,7 +638,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or ""
     execute(
-        "INSERT OR IGNORE INTO users(user_id,tg_username,trial_start_ts) VALUES(?,?,?)",
+        "INSERT INTO users(user_id,tg_username,trial_start_ts) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING",
         (uid, uname, int(time.time())),
     )
     await update.message.reply_text(
