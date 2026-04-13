@@ -25,3 +25,15 @@ def validate_pair_on_exchange(pair):
         return pair in ex.markets
     except Exception:
         return False
+
+def cancel_order(order_id, pair):
+    if SETTINGS.PAPER_TRADING: return {'id':order_id,'status':'cancelled'}
+    ex=get_client(); return ex.cancel_order(order_id, symbol=pair)
+
+def get_balance(currency='USDC'):
+    if SETTINGS.PAPER_TRADING: return SETTINGS.CAPITAL_USD
+    try:
+        ex=get_client(); bal=ex.fetch_balance()
+        return float(bal.get('free',{}).get(currency,0.0))
+    except Exception:
+        return 0.0

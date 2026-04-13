@@ -291,14 +291,31 @@ async def _do_status(app, chat_id, uid):
         await app.bot.send_message(chat_id=chat_id, text="Not registered. Use /start.", reply_markup=back_keyboard())
         return
     tier, auto, mode_val, dll, mot = row
+    from risk import portfolio_exposure_check, open_trade_count, trade_count_today, realized_pnl_today
+    from pair_manager import get_active_pairs
+    _, current_exp, remaining = portfolio_exposure_check()
+    max_exp = SETTINGS.CAPITAL_USD * SETTINGS.MAX_PORTFOLIO_EXPOSURE
+    exp_pct = (current_exp / max_exp * 100) if max_exp > 0 else 0
+    pnl_today = realized_pnl_today()
     lines = [
-        "📈 Status",
-        f"Tier: {tier}",
-        f"Auto-Trade: {'✅ ON' if auto else '⛔ OFF'}",
+        "📈 Bot Status",
+        "",
+        f"Auto-Trade: {'✅ AUTONOMOUS' if auto else '⛔ OFF'}",
         f"Mode: {'🔴 LIVE' if mode_val == 'LIVE' else '📝 PAPER'}",
-        f"Pair: {SETTINGS.PAIR}",
+        f"Kill Switch: {'🔴 ON' if SETTINGS.KILL_SWITCH else '🟢 OFF'}",
+        "",
+        f"Capital: ${SETTINGS.CAPITAL_USD:,.2f}",
+        f"Exposure: ${current_exp:,.0f} / ${max_exp:,.0f} ({exp_pct:.0f}%)",
+        f"Open Trades: {open_trade_count()}/{mot}",
+        "",
+        f"Today: {trade_count_today()} trades | PnL: ${pnl_today:,.2f}",
         f"Daily Loss Limit: ${dll}",
-        f"Max Open Trades: {mot}",
+        "",
+        f"Pairs: {len(get_active_pairs())} active",
+        f"Cycle: every {SETTINGS.ANALYSIS_INTERVAL_SECONDS}s",
+        f"AI Policy: {SETTINGS.AI_FUSION_POLICY}",
+        f"Min Confidence: {SETTINGS.AI_CONFIDENCE_MIN}",
+        f"Min Quality: {SETTINGS.MIN_SETUP_QUALITY}",
     ]
     await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
 
@@ -831,6 +848,49 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{i}. {p['pair']} — {p['direction'] or 'HOLD'} ({p['score'] or 0:.2f})")
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
+async def capital_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.")
+        return
+    if not context.args:
+        await update.message.reply_text(f"Capital: ${SETTINGS.CAPITAL_USD:,.2f}\nUsage: /capital <amount>", reply_markup=back_keyboard())
+        return
+    try:
+        val = float(context.args[0])
+        if val <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("Invalid amount.")
+        return
+    import config
+    config.SETTINGS.CAPITAL_USD = val
+    execute("INSERT INTO bot_state(key,value,updated_ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            ('capital_usd', str(val), int(time.time())))
+    await update.message.reply_text(f"Capital set to ${val:,.2f}", reply_markup=back_keyboard())
+
+async def maxexposure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.")
+        return
+    if not context.args:
+        pct = SETTINGS.MAX_PORTFOLIO_EXPOSURE
+        await update.message.reply_text(f"Max exposure: {pct*100:.0f}%\nUsage: /maxexposure <0.0-1.0>", reply_markup=back_keyboard())
+        return
+    try:
+        val = float(context.args[0])
+        if not 0 < val <= 1.0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("Must be 0 < value <= 1.0")
+        return
+    import config
+    config.SETTINGS.MAX_PORTFOLIO_EXPOSURE = val
+    execute("INSERT INTO bot_state(key,value,updated_ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            ('max_portfolio_exposure', str(val), int(time.time())))
+    await update.message.reply_text(f"Max exposure: {val*100:.0f}% (${SETTINGS.CAPITAL_USD * val:,.2f})", reply_markup=back_keyboard())
+
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from validators import run_all_checks
     await update.message.reply_text(run_all_checks(SETTINGS), reply_markup=back_keyboard())
@@ -870,6 +930,16 @@ async def post_init(application):
 
     init_db()
     seed_default_pair()
+
+    # Recover persisted config from bot_state
+    import config
+    for key, attr in [('capital_usd', 'CAPITAL_USD'), ('max_portfolio_exposure', 'MAX_PORTFOLIO_EXPOSURE')]:
+        row = fetchone("SELECT value FROM bot_state WHERE key=?", (key,))
+        if row and row[0]:
+            try:
+                setattr(config.SETTINGS, attr, float(row[0]))
+            except Exception:
+                pass
 
     # Store startup time
     try:
@@ -934,6 +1004,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ai", ai_cmd))
     app.add_handler(CommandHandler("killswitch", killswitch_cmd))
     app.add_handler(CommandHandler("blocked", blocked_cmd))
+    app.add_handler(CommandHandler("capital", capital_cmd))
+    app.add_handler(CommandHandler("maxexposure", maxexposure_cmd))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))

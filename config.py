@@ -64,6 +64,16 @@ class Settings:
     CONSECUTIVE_LOSS_PAUSE_SECONDS: int = int(os.getenv('CONSECUTIVE_LOSS_PAUSE_SECONDS', '3600'))
     BREAK_EVEN_ATR_MULTIPLIER: float = float(os.getenv('BREAK_EVEN_ATR_MULTIPLIER', '1.0'))
 
+    # --- Autonomous Trading ---
+    MAX_PORTFOLIO_EXPOSURE: float = float(os.getenv('MAX_PORTFOLIO_EXPOSURE', '0.50'))
+    CAPITAL_PER_TRADE_PCT: float = float(os.getenv('CAPITAL_PER_TRADE_PCT', '0.10'))
+    MIN_SETUP_QUALITY: float = float(os.getenv('MIN_SETUP_QUALITY', '0.3'))
+    MAX_RISK_FLAGS: int = int(os.getenv('MAX_RISK_FLAGS', '2'))
+    CONFIDENCE_SCALE_MIN: float = float(os.getenv('CONFIDENCE_SCALE_MIN', '0.5'))
+    CONFIDENCE_SCALE_MAX: float = float(os.getenv('CONFIDENCE_SCALE_MAX', '1.0'))
+    MAX_PAIRS_PER_CYCLE: int = int(os.getenv('MAX_PAIRS_PER_CYCLE', '3'))
+    TP_ATR_MULTIPLIER: float = float(os.getenv('TP_ATR_MULTIPLIER', '2.0'))
+
     # --- Kill Switch / Dry Run ---
     KILL_SWITCH: bool = _bool('KILL_SWITCH')
     DRY_RUN_MODE: bool = _bool('DRY_RUN_MODE')

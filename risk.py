@@ -97,6 +97,13 @@ def can_enter_enhanced(pair: str, side: str, signal_snapshot: dict = None) -> tu
         _log_blocked(pair, side, f'Max open trades ({SETTINGS.MAX_OPEN_TRADES})', signal_snapshot)
         return False, f'Max open trades ({SETTINGS.MAX_OPEN_TRADES})'
 
+    # 2.5 Portfolio exposure limit
+    can_trade, current_exp, remaining = portfolio_exposure_check()
+    if not can_trade:
+        max_exp = SETTINGS.CAPITAL_USD * SETTINGS.MAX_PORTFOLIO_EXPOSURE
+        _log_blocked(pair, side, f'Portfolio exposure ${current_exp:.0f}/${max_exp:.0f}', signal_snapshot)
+        return False, f'Portfolio full (${current_exp:.0f}/${max_exp:.0f})'
+
     # 3. Daily loss limit
     pnl = realized_pnl_today()
     if pnl <= -abs(SETTINGS.DAILY_LOSS_LIMIT_USD):
@@ -168,3 +175,56 @@ def should_move_to_break_even(entry_price: float, current_price: float, atr_valu
     if side.upper() == "BUY":
         return current_price >= entry_price + threshold
     return current_price <= entry_price - threshold
+
+# -------------------------------------------------------------------
+# Portfolio exposure
+# -------------------------------------------------------------------
+def portfolio_exposure_check() -> tuple:
+    """Returns (can_trade, current_exposure_usd, remaining_usd)."""
+    rows = fetchall("SELECT qty, entry FROM trades WHERE status='OPEN'")
+    total_exposure = sum(float(r[0]) * float(r[1]) for r in rows if r[0] and r[1])
+    max_allowed = SETTINGS.CAPITAL_USD * SETTINGS.MAX_PORTFOLIO_EXPOSURE
+    remaining = max(0, max_allowed - total_exposure)
+    return remaining > 0, total_exposure, remaining
+
+# -------------------------------------------------------------------
+# Confidence-scaled position sizing
+# -------------------------------------------------------------------
+def confidence_scaled_position_size(price: float, atr_value: float,
+                                     confidence: float, setup_quality: float,
+                                     remaining_capital: float) -> float:
+    """Position size scaled by confidence and quality, capped by capital limits."""
+    if atr_value <= 0 or price <= 0:
+        return 0.0
+    base_qty = position_size(price, atr_value)
+    conf_range = max(0.01, 1.0 - SETTINGS.AI_CONFIDENCE_MIN)
+    conf_normalized = max(0, min(1, (confidence - SETTINGS.AI_CONFIDENCE_MIN) / conf_range))
+    conf_factor = SETTINGS.CONFIDENCE_SCALE_MIN + conf_normalized * (SETTINGS.CONFIDENCE_SCALE_MAX - SETTINGS.CONFIDENCE_SCALE_MIN)
+    quality_bonus = min(1.2, 1.0 + setup_quality * 0.2)
+    scaled_qty = base_qty * conf_factor * quality_bonus
+    max_by_capital = (SETTINGS.CAPITAL_PER_TRADE_PCT * SETTINGS.CAPITAL_USD) / price
+    max_by_remaining = remaining_capital / price
+    return round(max(0.0, min(scaled_qty, max_by_capital, max_by_remaining)), 6)
+
+# -------------------------------------------------------------------
+# Setup quality filter
+# -------------------------------------------------------------------
+def should_skip_weak_setup(setup_quality: float, risk_flags: list, confidence: float) -> tuple:
+    """Returns (should_skip, reason)."""
+    if setup_quality < SETTINGS.MIN_SETUP_QUALITY:
+        return True, f'Quality {setup_quality:.2f} < {SETTINGS.MIN_SETUP_QUALITY}'
+    if len(risk_flags) > SETTINGS.MAX_RISK_FLAGS:
+        return True, f'{len(risk_flags)} risk flags > max {SETTINGS.MAX_RISK_FLAGS}'
+    if confidence < SETTINGS.AI_CONFIDENCE_MIN:
+        return True, f'Confidence {confidence:.2f} < {SETTINGS.AI_CONFIDENCE_MIN}'
+    return False, 'OK'
+
+# -------------------------------------------------------------------
+# Take-profit
+# -------------------------------------------------------------------
+def atr_take_profit(entry_price: float, atr_value: float, side: str = "BUY") -> float:
+    """TP at TP_ATR_MULTIPLIER * ATR from entry."""
+    distance = atr_value * SETTINGS.TP_ATR_MULTIPLIER
+    if side.upper() == "BUY":
+        return round(entry_price + distance, 6)
+    return round(entry_price - distance, 6)

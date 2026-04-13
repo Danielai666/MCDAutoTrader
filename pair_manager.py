@@ -111,6 +111,28 @@ def validate_pair(pair: str) -> tuple:
         return False, f'Validation failed: {e}'
 
 
+def get_best_tradable_pairs(max_pairs: int = None) -> list:
+    """Active pairs filtered and ranked for autonomous trading."""
+    from risk import is_duplicate_trade
+    ranking = get_pair_ranking()
+    max_p = max_pairs or SETTINGS.MAX_PAIRS_PER_CYCLE
+    now = int(time.time())
+    cutoff = 2 * SETTINGS.ANALYSIS_INTERVAL_SECONDS
+    result = []
+    for p in ranking:
+        if len(result) >= max_p:
+            break
+        if not p['direction'] or p['direction'] == 'HOLD':
+            continue
+        if p['last_ts'] and (now - p['last_ts']) > cutoff:
+            continue
+        side = 'BUY' if p['direction'] == 'BUY' else 'SELL'
+        if is_duplicate_trade(p['pair'], side):
+            continue
+        result.append(p)
+    return result
+
+
 def seed_default_pair():
     """Ensure the default SETTINGS.PAIR exists in trading_pairs table."""
     existing = fetchone("SELECT pair FROM trading_pairs WHERE pair=?", (SETTINGS.PAIR,))

@@ -111,6 +111,7 @@ def _migrate_sqlite_trades(conn):
         ('entry_snapshot', 'TEXT'),
         ('exit_snapshot', 'TEXT'),
         ('trade_type', "TEXT DEFAULT 'auto'"),
+        ('order_id', 'TEXT'),
     ]:
         try:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")

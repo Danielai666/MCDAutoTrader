@@ -68,6 +68,91 @@ def get_open_trades_for_pair(pair: str) -> list:
 
 
 # -------------------------
+# Autonomous execution bridge
+# -------------------------
+def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
+                              sl_price: float, tp_price: float,
+                              reason: str = "", entry_snapshot: str = None) -> dict:
+    """
+    Full trade execution: DB record + exchange order + SL/TP guards.
+    Returns {'success': bool, 'trade_id': int, 'order_id': str, 'mode': str, 'error': str}
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    if SETTINGS.DRY_RUN_MODE:
+        log.info("DRY RUN: %s %s %.6f %s @ %.2f", side, qty, qty, pair, price)
+        return {'success': True, 'trade_id': 0, 'order_id': 'dry-run', 'mode': 'DRY_RUN', 'error': ''}
+
+    # 1. Create DB record
+    trade_id = open_trade(pair, side, qty, price, reason=reason, entry_snapshot=entry_snapshot)
+
+    # 2. Execute on exchange
+    order_id = None
+    mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
+    try:
+        from exchange import place_market_order
+        result = place_market_order(pair, side, qty)
+        order_id = result.get('id', f'paper-{trade_id}')
+        # Store order_id
+        execute("UPDATE trades SET order_id=? WHERE id=?", (str(order_id), trade_id))
+    except Exception as e:
+        log.error("Order execution failed for %s: %s", pair, e)
+        execute("UPDATE trades SET status='FAILED', lifecycle='blocked', note=? WHERE id=?",
+                (f"Order failed: {e}", trade_id))
+        return {'success': False, 'trade_id': trade_id, 'order_id': None, 'mode': mode, 'error': str(e)}
+
+    # 3. Set SL/TP guards
+    admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
+    if admin_id:
+        set_manual_guard(admin_id, pair, sl=sl_price, tp=tp_price)
+
+    return {'success': True, 'trade_id': trade_id, 'order_id': order_id, 'mode': mode, 'error': ''}
+
+
+def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
+    """
+    Close all open trades for pair, executing on exchange if live.
+    Returns {'success': bool, 'closed_count': int, 'total_pnl': float, 'mode': str, 'errors': list}
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    from exchange import market_price, place_market_order
+    mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
+    errors = []
+    total_pnl = 0.0
+    closed = 0
+
+    try:
+        px = market_price(pair)
+    except Exception as e:
+        return {'success': False, 'closed_count': 0, 'total_pnl': 0, 'mode': mode, 'errors': [f'Price fetch: {e}']}
+
+    trades = get_open_trades_for_pair(pair)
+    for t in trades:
+        try:
+            # Execute opposite order on exchange
+            opposite = 'sell' if t['side'] == 'BUY' else 'buy'
+            if not SETTINGS.PAPER_TRADING:
+                place_market_order(pair, opposite, t['qty'])
+
+            pnl = close_trade(t['id'], px, reason)
+            total_pnl += pnl
+            closed += 1
+        except Exception as e:
+            log.error("Exit failed for trade %s: %s", t['id'], e)
+            errors.append(f"Trade #{t['id']}: {e}")
+
+    # Clear guards
+    admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
+    if admin_id:
+        clear_manual_guard(admin_id, pair, 'all')
+
+    return {'success': len(errors) == 0, 'closed_count': closed, 'total_pnl': total_pnl, 'mode': mode, 'errors': errors}
+
+
+# -------------------------
 # Manual guard utilities
 # -------------------------
 def set_manual_guard(uid: int, pair: str, sl: Optional[float] = None,
