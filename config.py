@@ -22,6 +22,17 @@ class Settings:
     DB_PATH: str = os.getenv('DB_PATH', './bot.db')
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
 
+    # --- Database ---
+    DB_ENGINE: str = os.getenv('DB_ENGINE', 'sqlite')  # 'sqlite' or 'postgres'
+    SUPABASE_URL: str = os.getenv('SUPABASE_URL', '')
+    SUPABASE_KEY: str = os.getenv('SUPABASE_KEY', '')
+    SUPABASE_DB_HOST: str = os.getenv('SUPABASE_DB_HOST', '')
+    SUPABASE_DB_PORT: int = int(os.getenv('SUPABASE_DB_PORT', '5432'))
+    SUPABASE_DB_NAME: str = os.getenv('SUPABASE_DB_NAME', 'postgres')
+    SUPABASE_DB_USER: str = os.getenv('SUPABASE_DB_USER', 'postgres')
+    SUPABASE_DB_PASSWORD: str = os.getenv('SUPABASE_DB_PASSWORD', '')
+    SUPABASE_SCHEMA: str = os.getenv('SUPABASE_SCHEMA', 'trading_bot')
+
     # --- Feature Flags ---
     FEATURE_MULTI_PAIR: bool = _bool('FEATURE_MULTI_PAIR')
     FEATURE_AI_FUSION: bool = _bool('FEATURE_AI_FUSION')

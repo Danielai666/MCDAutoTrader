@@ -17,7 +17,7 @@ def realized_pnl_today() -> float:
     return float(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else 0.0
 
 def open_trade_count() -> int:
-    rows = fetchall('SELECT COUNT(*) FROM trades WHERE status="OPEN"')
+    rows = fetchall('SELECT COUNT(*) FROM trades WHERE status='OPEN'')
     return int(rows[0][0]) if rows else 0
 
 def trade_count_today() -> int:
@@ -34,9 +34,9 @@ def last_trade_ts(pair: str = None) -> int:
 
 def consecutive_losses(pair: str = None) -> int:
     if pair:
-        rows = fetchall('SELECT pnl FROM trades WHERE status="CLOSED" AND pair=? ORDER BY ts_close DESC LIMIT 20', (pair,))
+        rows = fetchall('SELECT pnl FROM trades WHERE status='CLOSED' AND pair=? ORDER BY ts_close DESC LIMIT 20', (pair,))
     else:
-        rows = fetchall('SELECT pnl FROM trades WHERE status="CLOSED" ORDER BY ts_close DESC LIMIT 20')
+        rows = fetchall('SELECT pnl FROM trades WHERE status='CLOSED' ORDER BY ts_close DESC LIMIT 20')
     count = 0
     for (pnl,) in rows:
         if pnl is not None and float(pnl) < 0:
@@ -79,7 +79,7 @@ def is_consecutive_loss_paused() -> tuple:
     return False, ''
 
 def is_duplicate_trade(pair: str, side: str) -> bool:
-    rows = fetchall('SELECT COUNT(*) FROM trades WHERE status="OPEN" AND pair=? AND side=?', (pair, side.upper()))
+    rows = fetchall('SELECT COUNT(*) FROM trades WHERE status='OPEN' AND pair=? AND side=?', (pair, side.upper()))
     return int(rows[0][0]) > 0 if rows else False
 
 def can_enter_enhanced(pair: str, side: str, signal_snapshot: dict = None) -> tuple:

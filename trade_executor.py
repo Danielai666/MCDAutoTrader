@@ -18,12 +18,20 @@ def open_trade(pair: str, side: str, qty: float, price: float,
     Returns the inserted trade id (SQLite rowid).
     """
     now = int(time.time())
-    execute("""
-        INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, entry_snapshot, trade_type)
-        VALUES(?,?,?,?, 'OPEN', ?, ?, 'open', ?, 'auto')
-    """, (pair, side.upper(), float(qty), float(price), now, reason or "open_trade", entry_snapshot))
-    rowid = fetchone("SELECT last_insert_rowid()")[0]
-    return int(rowid)
+    from config import SETTINGS as _s
+    if _s.DB_ENGINE.lower() == 'postgres':
+        row = fetchone("""
+            INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, entry_snapshot, trade_type)
+            VALUES(%s,%s,%s,%s, 'OPEN', %s, %s, 'open', %s, 'auto') RETURNING id
+        """, (pair, side.upper(), float(qty), float(price), now, reason or "open_trade", entry_snapshot))
+        return int(row[0]) if row else 0
+    else:
+        execute("""
+            INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, entry_snapshot, trade_type)
+            VALUES(?,?,?,?, 'OPEN', ?, ?, 'open', ?, 'auto')
+        """, (pair, side.upper(), float(qty), float(price), now, reason or "open_trade", entry_snapshot))
+        rowid = fetchone("SELECT last_insert_rowid()")[0]
+        return int(rowid)
 
 
 def close_all_for_pair(pair: str, reason: str = "") -> int:
@@ -31,11 +39,11 @@ def close_all_for_pair(pair: str, reason: str = "") -> int:
     Closes all OPEN trades for the given pair.
     Paper-safe fallback: just marks them CLOSED (your PnL may be set elsewhere).
     """
-    rows = fetchall('SELECT id FROM trades WHERE status="OPEN" AND pair IN (?,?)',
+    rows = fetchall('SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?)',
                     (pair, pair.replace('/', '')))
     count = 0
     for (tid,) in rows:
-        count += execute('UPDATE trades SET status="CLOSED", note=COALESCE(note,"")||? WHERE id=?',
+        count += execute('UPDATE trades SET status='CLOSED', note=COALESCE(note,"")||? WHERE id=?',
                          (f" | {reason}", tid))
     return count
 

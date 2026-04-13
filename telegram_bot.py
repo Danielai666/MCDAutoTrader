@@ -137,14 +137,14 @@ def _save_trailing(uid: int, pair: str, trail_stop: Optional[float], high_wm: Op
 
 def _paper_close_all(pair: str, px: float) -> Tuple[int, float]:
     now = int(time.time())
-    rows = fetchall('SELECT id, side, qty, entry FROM trades WHERE status="OPEN" AND pair=?', (pair,))
+    rows = fetchall('SELECT id, side, qty, entry FROM trades WHERE status='OPEN' AND pair=?', (pair,))
     total_pnl = 0.0
     closed = 0
     for tid, side, qty, entry in rows:
         qty = float(qty); entry = float(entry)
         pnl = (px - entry) * qty if side == "BUY" else (entry - px) * qty
         execute(
-            'UPDATE trades SET exit=?, pnl=?, status="CLOSED", ts_close=? WHERE id=?',
+            'UPDATE trades SET exit=?, pnl=?, status='CLOSED', ts_close=? WHERE id=?',
             (px, pnl, now, tid),
         )
         total_pnl += pnl
