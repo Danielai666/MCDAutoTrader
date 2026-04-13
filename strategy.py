@@ -1,37 +1,230 @@
 import pandas as pd
 
-from indicators import macd,rsi,stochastic,ema_pair,vol_ma
-from divergence import detect_divergence
-def tf_signal(df: pd.DataFrame)->dict:
- mline,msig,mhist=macd(df['close']); r=rsi(df['close'],14); k,d=stochastic(df['high'],df['low'],df['close'],14,3)
- e9,e21=ema_pair(df['close'],9,21); vma=vol_ma(df['volume'],20)
- md=detect_divergence(df['close'],mline); rd=detect_divergence(df['close'],r)
- vol_ok=df['volume'].iloc[-1]>vma.iloc[-1]; st_buy=(k.iloc[-1]>d.iloc[-1]) and (k.iloc[-1]<80); st_sell=(k.iloc[-1]<d.iloc[-1]) and (k.iloc[-1]>20)
- up=e9.iloc[-1]>e21.iloc[-1]; down=e9.iloc[-1]<e21.iloc[-1]
- score=0; reasons=[]
- if md=='bullish': score+=1; reasons.append('MACD bullish div')
- if rd=='bullish': score+=1; reasons.append('RSI bullish div')
- if md=='bearish': score-=1; reasons.append('MACD bearish div')
- if rd=='bearish': score-=1; reasons.append('RSI bearish div')
- if vol_ok: reasons.append('Volume > MA20')
- if up: reasons.append('EMA9>EMA21')
- if down: reasons.append('EMA9<EMA21')
- if st_buy: reasons.append('StochK>D (bullish zone)')
- if st_sell: reasons.append('StochK<D (bearish zone)')
- direction='HOLD'
- if score>=2 and vol_ok and up and st_buy: direction='BUY'
- elif score<=-2 and vol_ok and down and st_sell: direction='SELL'
- return {'direction':direction,'score':score,'reasons':', '.join(reasons),
- 'snapshot':{'macd':float(mline.iloc[-1]),'rsi':float(r.iloc[-1]),'stoch_k':float(k.iloc[-1]),'stoch_d':float(d.iloc[-1]),'ema9_gt_ema21':bool(up)}}
-def merge_mtf(signals:dict)->dict:
- w={'30m':1.0,'1h':1.5,'4h':2.0}; regime=signals.get('1d',{}).get('direction','HOLD'); wsum=0; s=0
- for tf,sig in signals.items():
- if tf=='1d': continue
- v=1 if sig.get('direction')=='BUY' else -1 if sig.get('direction')=='SELL' else 0
- s+=v*w.get(tf,1.0); wsum+=w.get(tf,1.0)
- m=s/wsum if wsum else 0.0; md='HOLD'
- if m>0.4: md='BUY'
- if m<-0.4: md='SELL'
- if regime=='SELL' and md=='BUY': md='HOLD'
- if regime=='BUY' and md=='SELL': md='HOLD'
- return {'merged_direction':md,'merged_score':m,'regime':regime}
+from config import SETTINGS
+from indicators import macd, rsi, stochastic, ema_pair, vol_ma, atr, adx, bollinger
+from divergence import detect_divergence, detect_hidden_divergence
+
+
+def tf_signal(df: pd.DataFrame) -> dict:
+    close = df['close']; high = df['high']; low = df['low']; vol = df['volume']
+
+    # --- compute all indicators ---
+    mline, msig, mhist = macd(close)
+    r = rsi(close, 14)
+    k, d = stochastic(high, low, close, 14, 3)
+    e9, e21 = ema_pair(close, 9, 21)
+    vma = vol_ma(vol, 20)
+    a = atr(high, low, close, SETTINGS.ATR_PERIOD)
+    adx_line, plus_di, minus_di = adx(high, low, close, SETTINGS.ADX_PERIOD)
+    bb_up, bb_mid, bb_lo = bollinger(close, SETTINGS.BB_PERIOD, SETTINGS.BB_STD)
+
+    # --- divergences (regular + hidden) ---
+    md_type, md_str = detect_divergence(close, mline)
+    rd_type, rd_str = detect_divergence(close, r)
+
+    hid_md_type, hid_md_str = ("none", 0.0)
+    hid_rd_type, hid_rd_str = ("none", 0.0)
+    if SETTINGS.FEATURE_HIDDEN_DIVERGENCE:
+        hid_md_type, hid_md_str = detect_hidden_divergence(close, mline)
+        hid_rd_type, hid_rd_str = detect_hidden_divergence(close, r)
+
+    # --- candle patterns ---
+    candle_summary = None
+    if SETTINGS.FEATURE_CANDLE_PATTERNS:
+        from candles import detect_patterns, summarize_patterns
+        patterns = detect_patterns(df, lookback=3)
+        candle_summary = summarize_patterns(patterns)
+
+    # --- market regime (for daily TF) ---
+    regime_result = None
+    if SETTINGS.FEATURE_MARKET_REGIME:
+        from market_regime import detect_regime
+        regime_result = detect_regime(df)
+
+    # --- ADX trend filter ---
+    cur_adx = float(adx_line.iloc[-1])
+    if cur_adx < SETTINGS.ADX_TREND_MIN:
+        return _build_result(
+            'HOLD', 0, f'ADX {cur_adx:.1f} < {SETTINGS.ADX_TREND_MIN} (choppy)',
+            close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
+            candle_summary, regime_result
+        )
+
+    # --- weighted scoring ---
+    buy_score = 0.0; sell_score = 0.0; reasons = []; components = []
+
+    # 1. Regular divergence (weight 1.5 * strength)
+    if md_type == 'bullish':
+        buy_score += 1.5 * md_str; reasons.append(f'MACD bull div ({md_str:.2f})')
+        components.append({'name': 'macd_div', 'direction': 'bullish', 'weight': round(1.5 * md_str, 3)})
+    if rd_type == 'bullish':
+        buy_score += 1.5 * rd_str; reasons.append(f'RSI bull div ({rd_str:.2f})')
+        components.append({'name': 'rsi_div', 'direction': 'bullish', 'weight': round(1.5 * rd_str, 3)})
+    if md_type == 'bearish':
+        sell_score += 1.5 * md_str; reasons.append(f'MACD bear div ({md_str:.2f})')
+        components.append({'name': 'macd_div', 'direction': 'bearish', 'weight': round(1.5 * md_str, 3)})
+    if rd_type == 'bearish':
+        sell_score += 1.5 * rd_str; reasons.append(f'RSI bear div ({rd_str:.2f})')
+        components.append({'name': 'rsi_div', 'direction': 'bearish', 'weight': round(1.5 * rd_str, 3)})
+
+    # 2. Hidden divergence (weight 1.0 * strength) — trend continuation
+    if SETTINGS.FEATURE_HIDDEN_DIVERGENCE:
+        if hid_md_type == 'hidden_bullish':
+            buy_score += 1.0 * hid_md_str; reasons.append(f'MACD hidden bull ({hid_md_str:.2f})')
+            components.append({'name': 'hidden_macd_div', 'direction': 'bullish', 'weight': round(1.0 * hid_md_str, 3)})
+        if hid_rd_type == 'hidden_bullish':
+            buy_score += 1.0 * hid_rd_str; reasons.append(f'RSI hidden bull ({hid_rd_str:.2f})')
+            components.append({'name': 'hidden_rsi_div', 'direction': 'bullish', 'weight': round(1.0 * hid_rd_str, 3)})
+        if hid_md_type == 'hidden_bearish':
+            sell_score += 1.0 * hid_md_str; reasons.append(f'MACD hidden bear ({hid_md_str:.2f})')
+            components.append({'name': 'hidden_macd_div', 'direction': 'bearish', 'weight': round(1.0 * hid_md_str, 3)})
+        if hid_rd_type == 'hidden_bearish':
+            sell_score += 1.0 * hid_rd_str; reasons.append(f'RSI hidden bear ({hid_rd_str:.2f})')
+            components.append({'name': 'hidden_rsi_div', 'direction': 'bearish', 'weight': round(1.0 * hid_rd_str, 3)})
+
+    # 3. EMA trend (weight 1.0)
+    up = e9.iloc[-1] > e21.iloc[-1]
+    if up:
+        buy_score += 1.0; reasons.append('EMA9>EMA21')
+        components.append({'name': 'ema_trend', 'direction': 'bullish', 'weight': 1.0})
+    else:
+        sell_score += 1.0; reasons.append('EMA9<EMA21')
+        components.append({'name': 'ema_trend', 'direction': 'bearish', 'weight': 1.0})
+
+    # 4. Stochastic (weight 0.75)
+    st_k, st_d = float(k.iloc[-1]), float(d.iloc[-1])
+    if st_k > st_d and st_k < 80:
+        buy_score += 0.75; reasons.append('Stoch bullish')
+        components.append({'name': 'stochastic', 'direction': 'bullish', 'weight': 0.75})
+    elif st_k < st_d and st_k > 20:
+        sell_score += 0.75; reasons.append('Stoch bearish')
+        components.append({'name': 'stochastic', 'direction': 'bearish', 'weight': 0.75})
+
+    # 5. Volume (weight 0.5)
+    vol_ok = float(vol.iloc[-1]) > float(vma.iloc[-1])
+    if vol_ok:
+        buy_score += 0.5; sell_score += 0.5; reasons.append('Vol > MA20')
+        components.append({'name': 'volume', 'direction': 'neutral', 'weight': 0.5})
+
+    # 6. Bollinger position (weight 0.5)
+    bb_pos = _bb_pos(close.iloc[-1], bb_up.iloc[-1], bb_lo.iloc[-1])
+    if bb_pos < 0.2:
+        buy_score += 0.5; reasons.append(f'Near BB lower ({bb_pos:.2f})')
+        components.append({'name': 'bollinger', 'direction': 'bullish', 'weight': 0.5})
+    elif bb_pos > 0.8:
+        sell_score += 0.5; reasons.append(f'Near BB upper ({bb_pos:.2f})')
+        components.append({'name': 'bollinger', 'direction': 'bearish', 'weight': 0.5})
+
+    # 7. MACD histogram momentum (weight 0.5)
+    h_cur, h_prev = float(mhist.iloc[-1]), float(mhist.iloc[-2])
+    if h_cur > h_prev and h_cur > 0:
+        buy_score += 0.5; reasons.append('MACD hist rising')
+        components.append({'name': 'macd_hist', 'direction': 'bullish', 'weight': 0.5})
+    elif h_cur < h_prev and h_cur < 0:
+        sell_score += 0.5; reasons.append('MACD hist falling')
+        components.append({'name': 'macd_hist', 'direction': 'bearish', 'weight': 0.5})
+
+    # 8. Candle confirmation (weight 0.75) — feature flag
+    if SETTINGS.FEATURE_CANDLE_PATTERNS and candle_summary:
+        net = candle_summary.get('net_score', 0)
+        if net > 0:
+            buy_score += min(0.75, net * 0.5); reasons.append(f'Candle bullish ({net:.2f})')
+            components.append({'name': 'candles', 'direction': 'bullish', 'weight': round(min(0.75, net * 0.5), 3)})
+        elif net < 0:
+            sell_score += min(0.75, abs(net) * 0.5); reasons.append(f'Candle bearish ({net:.2f})')
+            components.append({'name': 'candles', 'direction': 'bearish', 'weight': round(min(0.75, abs(net) * 0.5), 3)})
+
+    # --- direction decision (threshold 1.5) ---
+    direction = 'HOLD'
+    score = buy_score - sell_score
+    if buy_score >= 1.5 and buy_score > sell_score: direction = 'BUY'
+    elif sell_score >= 1.5 and sell_score > buy_score: direction = 'SELL'
+
+    return _build_result(
+        direction, score, ', '.join(reasons),
+        close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
+        candle_summary, regime_result, components
+    )
+
+
+def _bb_pos(price, upper, lower):
+    span = float(upper) - float(lower)
+    if span <= 0: return 0.5
+    return max(0.0, min(1.0, (float(price) - float(lower)) / span))
+
+
+def _build_result(direction, score, reasons, close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
+                  candle_summary=None, regime_result=None, components=None):
+    snapshot = {
+        'macd': float(mline.iloc[-1]), 'rsi': float(r.iloc[-1]),
+        'stoch_k': float(k.iloc[-1]), 'stoch_d': float(d.iloc[-1]),
+        'ema9_gt_ema21': bool(e9.iloc[-1] > e21.iloc[-1]),
+        'adx': float(adx_line.iloc[-1]), 'atr': float(a.iloc[-1]),
+        'bb_position': _bb_pos(close.iloc[-1], bb_up.iloc[-1], bb_lo.iloc[-1]),
+    }
+    if candle_summary:
+        snapshot['candles'] = candle_summary
+    if regime_result:
+        snapshot['regime'] = regime_result.to_dict()
+
+    result = {
+        'direction': direction, 'score': score,
+        'reasons': reasons, 'snapshot': snapshot,
+    }
+    if components:
+        result['components'] = components
+    return result
+
+
+def merge_mtf(signals: dict) -> dict:
+    w = {'30m': 1.0, '1h': 1.5, '4h': 2.0}
+    regime = signals.get('1d', {}).get('direction', 'HOLD')
+
+    # Use market regime if available
+    regime_detail = None
+    daily_snap = signals.get('1d', {}).get('snapshot', {})
+    if daily_snap.get('regime'):
+        regime_detail = daily_snap['regime']
+        r = regime_detail.get('regime', '')
+        if r == 'trending_up': regime = 'BUY'
+        elif r == 'trending_down': regime = 'SELL'
+        else: regime = 'HOLD'
+
+    wsum = 0; s = 0
+    for tf, sig in signals.items():
+        if tf == '1d': continue
+        v = 1 if sig.get('direction') == 'BUY' else -1 if sig.get('direction') == 'SELL' else 0
+        s += v * w.get(tf, 1.0); wsum += w.get(tf, 1.0)
+    m = s / wsum if wsum else 0.0
+    md = 'HOLD'
+    if m > 0.4: md = 'BUY'
+    if m < -0.4: md = 'SELL'
+    if regime == 'SELL' and md == 'BUY': md = 'HOLD'
+    if regime == 'BUY' and md == 'SELL': md = 'HOLD'
+
+    result = {'merged_direction': md, 'merged_score': m, 'regime': regime}
+    if regime_detail:
+        result['regime_detail'] = regime_detail
+    return result
+
+
+def build_score_breakdown(signals: dict, merged: dict) -> dict:
+    """Structured explainable breakdown for Telegram and AI input."""
+    by_tf = {}
+    for tf, sig in signals.items():
+        by_tf[tf] = {
+            'direction': sig.get('direction'),
+            'score': sig.get('score'),
+            'reasons': sig.get('reasons'),
+            'components': sig.get('components', []),
+        }
+
+    return {
+        'by_timeframe': by_tf,
+        'regime': merged.get('regime'),
+        'regime_detail': merged.get('regime_detail'),
+        'merged': {
+            'direction': merged.get('merged_direction'),
+            'score': merged.get('merged_score'),
+        },
+    }

@@ -1,94 +1,148 @@
 import sqlite3
-from typing import Any, Iterable, Optional
+from typing import Optional, List
 from config import SETTINGS
 
-_CONN: Optional[sqlite3.Connection] = None
+SCHEMA = '''
+PRAGMA journal_mode=WAL;
 
-def _get_conn() -> sqlite3.Connection:
- global _CONN
- if _CONN is None:
- _CONN = sqlite3.connect(SETTINGS.DB_PATH, check_same_thread=False)
- _CONN.row_factory = sqlite3.Row
- return _CONN
+-- Original tables
+CREATE TABLE IF NOT EXISTS users(
+    user_id INTEGER PRIMARY KEY,
+    tg_username TEXT,
+    tier TEXT DEFAULT "BASIC",
+    trial_start_ts INTEGER,
+    trial_end_ts INTEGER,
+    ai_api_key TEXT,
+    autotrade_enabled INTEGER DEFAULT 0,
+    trade_mode TEXT DEFAULT "PAPER",
+    daily_loss_limit REAL DEFAULT 50.0,
+    max_open_trades INTEGER DEFAULT 2
+);
 
-def execute(sql: str, params: Iterable[Any] = ()):
- conn = _get_conn()
- cur = conn.cursor()
- cur.execute(sql, tuple(params))
- conn.commit()
- return cur.lastrowid
+CREATE TABLE IF NOT EXISTS signals(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER,
+    pair TEXT,
+    tf TEXT,
+    direction TEXT,
+    reason TEXT
+);
 
-def fetchone(sql: str, params: Iterable[Any] = ()):
- cur = _get_conn().cursor()
- cur.execute(sql, tuple(params))
- return cur.fetchone()
+CREATE TABLE IF NOT EXISTS trades(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_open INTEGER,
+    ts_close INTEGER,
+    pair TEXT,
+    side TEXT,
+    qty REAL,
+    entry REAL,
+    exit REAL,
+    pnl REAL,
+    status TEXT,
+    note TEXT
+);
 
-def fetchall(sql: str, params: Iterable[Any] = ()):
- cur = _get_conn().cursor()
- cur.execute(sql, tuple(params))
- return cur.fetchall()
+CREATE TABLE IF NOT EXISTS manual_guards(
+    user_id INTEGER,
+    pair TEXT,
+    stop_loss REAL,
+    take_profit REAL,
+    trail_pct REAL,
+    trail_stop REAL,
+    high_watermark REAL,
+    PRIMARY KEY(user_id, pair)
+);
+
+-- New tables (Phase 1)
+CREATE TABLE IF NOT EXISTS trading_pairs(
+    pair TEXT PRIMARY KEY,
+    is_active INTEGER DEFAULT 1,
+    added_ts INTEGER,
+    last_signal_ts INTEGER,
+    last_direction TEXT,
+    last_score REAL,
+    notes TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS ai_decisions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    pair TEXT NOT NULL,
+    action TEXT NOT NULL,
+    side TEXT,
+    confidence REAL,
+    setup_quality REAL,
+    reasons TEXT,
+    warnings TEXT,
+    risk_flags TEXT,
+    source TEXT,
+    fusion_policy TEXT,
+    raw_response TEXT,
+    was_executed INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS blocked_trades(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    pair TEXT NOT NULL,
+    side TEXT,
+    reason TEXT NOT NULL,
+    signal_snapshot TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bot_state(
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_ts INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS performance_snapshots(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    pair TEXT,
+    period TEXT,
+    total_trades INTEGER,
+    winning_trades INTEGER,
+    losing_trades INTEGER,
+    total_pnl REAL,
+    avg_win REAL,
+    avg_loss REAL,
+    win_rate REAL,
+    expectancy REAL
+);
+'''
+
+def get_conn():
+    return sqlite3.connect(SETTINGS.DB_PATH, check_same_thread=False)
 
 def init_db():
- conn = _get_conn()
- cur = conn.cursor()
+    conn = get_conn()
+    conn.executescript(SCHEMA)
+    _migrate_trades_table(conn)
+    conn.close()
 
- # users
- cur.execute('''
- CREATE TABLE IF NOT EXISTS users(
- user_id INTEGER PRIMARY KEY,
- tg_username TEXT,
- tier TEXT DEFAULT 'TRIAL',
- autotrade_enabled INTEGER DEFAULT 0,
- trade_mode TEXT DEFAULT 'PAPER',
- daily_loss_limit REAL DEFAULT 50,
- max_open_trades INTEGER DEFAULT 2,
- trial_start_ts INTEGER
- );
- ''')
+def _migrate_trades_table(conn):
+    """Safely add new columns to trades table for existing DBs."""
+    for col, typedef in [
+        ('lifecycle', "TEXT DEFAULT 'open'"),
+        ('entry_snapshot', 'TEXT'),
+        ('exit_snapshot', 'TEXT'),
+        ('trade_type', "TEXT DEFAULT 'auto'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass  # column already exists
+    conn.commit()
 
- # trades
- cur.execute('''
- CREATE TABLE IF NOT EXISTS trades(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- pair TEXT NOT NULL,
- side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
- qty REAL NOT NULL,
- entry REAL NOT NULL,
- exit REAL,
- status TEXT NOT NULL DEFAULT 'OPEN',
- pnl REAL,
- ts_open INTEGER NOT NULL DEFAULT (strftime('%s','now')),
- ts_close INTEGER,
- notes TEXT
- );
- ''')
- cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_pair_status ON trades(pair,status);")
+def fetchone(q, p=()):
+    conn = get_conn(); cur = conn.cursor(); cur.execute(q, p)
+    r = cur.fetchone(); conn.close(); return r
 
- # signals
- cur.execute('''
- CREATE TABLE IF NOT EXISTS signals(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- pair TEXT,
- timeframe TEXT,
- direction TEXT,
- score REAL,
- notes TEXT,
- ts INTEGER NOT NULL DEFAULT (strftime('%s','now'))
- );
- ''')
+def fetchall(q, p=()):
+    conn = get_conn(); cur = conn.cursor(); cur.execute(q, p)
+    r = cur.fetchall(); conn.close(); return r
 
- # manual guards
- cur.execute('''
- CREATE TABLE IF NOT EXISTS manual_guards(
- user_id INTEGER NOT NULL,
- pair TEXT NOT NULL,
- stop_loss REAL,
- take_profit REAL,
- trail_pct REAL,
- trail_stop REAL,
- high_watermark REAL,
- PRIMARY KEY (user_id, pair)
- );
- ''')
-
- conn.commit()
+def execute(q, p=()):
+    conn = get_conn(); cur = conn.cursor(); cur.execute(q, p)
+    conn.commit(); rid = cur.lastrowid; conn.close(); return rid

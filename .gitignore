@@ -20,3 +20,4 @@ bot.db-*
 *.db-*
 bot.db
 bot.db-*
+.venv_broken/
