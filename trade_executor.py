@@ -39,11 +39,11 @@ def close_all_for_pair(pair: str, reason: str = "") -> int:
     Closes all OPEN trades for the given pair.
     Paper-safe fallback: just marks them CLOSED (your PnL may be set elsewhere).
     """
-    rows = fetchall('SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?)',
+    rows = fetchall("SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?)",
                     (pair, pair.replace('/', '')))
     count = 0
     for (tid,) in rows:
-        count += execute('UPDATE trades SET status='CLOSED', note=COALESCE(note,"")||? WHERE id=?',
+        count += execute("UPDATE trades SET status='CLOSED', note=COALESCE(note,'')||? WHERE id=?",
                          (f" | {reason}", tid))
     return count
 

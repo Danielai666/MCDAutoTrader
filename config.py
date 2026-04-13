@@ -27,7 +27,7 @@ class Settings:
     SUPABASE_URL: str = os.getenv('SUPABASE_URL', '')
     SUPABASE_KEY: str = os.getenv('SUPABASE_KEY', '')
     SUPABASE_DB_HOST: str = os.getenv('SUPABASE_DB_HOST', '')
-    SUPABASE_DB_PORT: int = int(os.getenv('SUPABASE_DB_PORT', '5432'))
+    SUPABASE_DB_PORT: int = int(os.getenv('SUPABASE_DB_PORT', '6543'))
     SUPABASE_DB_NAME: str = os.getenv('SUPABASE_DB_NAME', 'postgres')
     SUPABASE_DB_USER: str = os.getenv('SUPABASE_DB_USER', 'postgres')
     SUPABASE_DB_PASSWORD: str = os.getenv('SUPABASE_DB_PASSWORD', '')
