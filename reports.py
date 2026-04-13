@@ -11,17 +11,31 @@ def _fmt_usd(x):
 
 
 # -------------------------------------------------------------------
-# Trade queries
+# Trade queries (user_id=None → all users for backward compat)
 # -------------------------------------------------------------------
-def get_open_trades(pair: str | None = None) -> List[Tuple]:
-    if pair:
+def get_open_trades(user_id: int = None, pair: str | None = None) -> List[Tuple]:
+    if user_id is not None and pair:
+        return fetchall(
+            "SELECT id,pair,side,qty,entry,ts_open FROM trades WHERE status='OPEN' AND user_id=? AND pair=? ORDER BY id DESC", (user_id, pair))
+    elif user_id is not None:
+        return fetchall(
+            "SELECT id,pair,side,qty,entry,ts_open FROM trades WHERE status='OPEN' AND user_id=? ORDER BY id DESC", (user_id,))
+    elif pair:
         return fetchall(
             "SELECT id,pair,side,qty,entry,ts_open FROM trades WHERE status='OPEN' AND pair=? ORDER BY id DESC", (pair,))
     return fetchall("SELECT id,pair,side,qty,entry,ts_open FROM trades WHERE status='OPEN' ORDER BY id DESC")
 
 
-def get_recent_closed(n: int = 5, pair: str | None = None) -> List[Tuple]:
-    if pair:
+def get_recent_closed(n: int = 5, user_id: int = None, pair: str | None = None) -> List[Tuple]:
+    if user_id is not None and pair:
+        return fetchall(
+            "SELECT id,pair,side,qty,entry,exit_price,pnl,ts_close FROM trades WHERE status='CLOSED' AND user_id=? AND pair=? ORDER BY id DESC LIMIT ?",
+            (user_id, pair, n))
+    elif user_id is not None:
+        return fetchall(
+            "SELECT id,pair,side,qty,entry,exit_price,pnl,ts_close FROM trades WHERE status='CLOSED' AND user_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, n))
+    elif pair:
         return fetchall(
             "SELECT id,pair,side,qty,entry,exit_price,pnl,ts_close FROM trades WHERE status='CLOSED' AND pair=? ORDER BY id DESC LIMIT ?",
             (pair, n))
@@ -30,18 +44,25 @@ def get_recent_closed(n: int = 5, pair: str | None = None) -> List[Tuple]:
         (n,))
 
 
-def daily_pnl_sum() -> float:
+def daily_pnl_sum(user_id: int = None) -> float:
     start = int(time.time()) - 86400
-    row = fetchone("SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status='CLOSED' AND ts_close>=?", (start,))
+    if user_id is not None:
+        row = fetchone("SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status='CLOSED' AND ts_close>=? AND user_id=?", (start, user_id))
+    else:
+        row = fetchone("SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status='CLOSED' AND ts_close>=?", (start,))
     return float(row[0] if row and row[0] is not None else 0.0)
 
 
 # -------------------------------------------------------------------
 # Performance summary
 # -------------------------------------------------------------------
-def performance_summary(pair: str = None, days: int = 30) -> dict:
+def performance_summary(user_id: int = None, pair: str = None, days: int = 30) -> dict:
     start = int(time.time()) - (days * 86400)
-    if pair:
+    if user_id is not None and pair:
+        rows = fetchall("SELECT pnl FROM trades WHERE status='CLOSED' AND user_id=? AND pair=? AND ts_close>=?", (user_id, pair, start))
+    elif user_id is not None:
+        rows = fetchall("SELECT pnl FROM trades WHERE status='CLOSED' AND user_id=? AND ts_close>=?", (user_id, start))
+    elif pair:
         rows = fetchall("SELECT pnl FROM trades WHERE status='CLOSED' AND pair=? AND ts_close>=?", (pair, start))
     else:
         rows = fetchall("SELECT pnl FROM trades WHERE status='CLOSED' AND ts_close>=?", (start,))
@@ -81,8 +102,8 @@ def performance_summary(pair: str = None, days: int = 30) -> dict:
 # -------------------------------------------------------------------
 # Formatted reports
 # -------------------------------------------------------------------
-def format_position_report() -> str:
-    rows = get_open_trades()
+def format_position_report(user_id: int = None) -> str:
+    rows = get_open_trades(user_id)
     if not rows:
         return "No open positions."
     lines = ["Open Positions:"]
@@ -97,8 +118,8 @@ def format_position_report() -> str:
     return "\n".join(lines)
 
 
-def format_pnl_report(pair: str = None, days: int = 30) -> str:
-    s = performance_summary(pair, days)
+def format_pnl_report(user_id: int = None, pair: str = None, days: int = 30) -> str:
+    s = performance_summary(user_id, pair, days)
     pair_txt = pair or "All pairs"
     return (
         f"Performance Report ({pair_txt}, {days}d)\n"
@@ -112,16 +133,17 @@ def format_pnl_report(pair: str = None, days: int = 30) -> str:
     )
 
 
-def daily_report(pair: str = None) -> str:
-    pnl = daily_pnl_sum()
-    closed = get_recent_closed(n=50, pair=pair)
-    today_count = len(closed)  # approximate
+def daily_report(user_id: int = None, pair: str = None) -> str:
+    pnl = daily_pnl_sum(user_id)
+    closed = get_recent_closed(n=50, user_id=user_id, pair=pair)
+    today_count = len(closed)
 
-    # Include equity & drawdown info
     equity_lines = ""
     try:
         from risk import get_equity_status
-        eq = get_equity_status()
+        from user_context import UserContext
+        ctx = UserContext.load(user_id) if user_id else None
+        eq = get_equity_status(ctx)
         equity_lines = (
             f"\nEquity: {_fmt_usd(eq['equity'])} (peak: {_fmt_usd(eq['peak_equity'])})\n"
             f"Drawdown: {eq['drawdown_pct']:.1%} ({_fmt_usd(eq['drawdown_usd'])})\n"
@@ -134,40 +156,23 @@ def daily_report(pair: str = None) -> str:
         f"Daily Summary\n"
         f"PnL Today: {_fmt_usd(pnl)}\n"
         f"Trades Closed: {today_count}\n"
-        f"Open Positions: {len(get_open_trades(pair))}"
+        f"Open Positions: {len(get_open_trades(user_id, pair))}"
         f"{equity_lines}"
     )
 
 
-def blocked_trades_summary(days: int = 7) -> str:
+def blocked_trades_summary(user_id: int = None, days: int = 7) -> str:
     start = int(time.time()) - (days * 86400)
-    rows = fetchall("SELECT pair, side, reason, ts FROM blocked_trades WHERE ts>=? ORDER BY ts DESC LIMIT 10", (start,))
+    if user_id is not None:
+        rows = fetchall("SELECT pair, side, reason, ts FROM blocked_trades WHERE ts>=? AND user_id=? ORDER BY ts DESC LIMIT 10", (start, user_id))
+    else:
+        rows = fetchall("SELECT pair, side, reason, ts FROM blocked_trades WHERE ts>=? ORDER BY ts DESC LIMIT 10", (start,))
     if not rows:
         return f"No blocked trades in last {days} days."
     lines = [f"Blocked Trades (last {days}d):"]
     for pair, side, reason, ts in rows:
         lines.append(f"  {pair} {side}: {reason}")
     return "\n".join(lines)
-
-
-# -------------------------------------------------------------------
-# CSV export
-# -------------------------------------------------------------------
-def export_trades_csv(filepath: str, pair: str | None = None) -> str:
-    if pair:
-        rows = fetchall(
-            "SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades WHERE pair=? ORDER BY id",
-            (pair,))
-    else:
-        rows = fetchall("SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades ORDER BY id")
-    headers = ["id", "pair", "side", "qty", "entry", "exit", "pnl", "status", "ts_open", "ts_close"]
-    import os, csv
-    os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(headers)
-        w.writerows(rows)
-    return filepath
 
 
 def format_trades_brief(rows: List[Tuple], kind: str) -> str:
@@ -185,14 +190,42 @@ def format_trades_brief(rows: List[Tuple], kind: str) -> str:
 
 
 # -------------------------------------------------------------------
+# CSV export
+# -------------------------------------------------------------------
+def export_trades_csv(filepath: str, user_id: int = None, pair: str | None = None) -> str:
+    if user_id is not None and pair:
+        rows = fetchall(
+            "SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades WHERE user_id=? AND pair=? ORDER BY id",
+            (user_id, pair))
+    elif user_id is not None:
+        rows = fetchall(
+            "SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades WHERE user_id=? ORDER BY id",
+            (user_id,))
+    elif pair:
+        rows = fetchall(
+            "SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades WHERE pair=? ORDER BY id",
+            (pair,))
+    else:
+        rows = fetchall("SELECT id,pair,side,qty,entry,exit_price,pnl,status,ts_open,ts_close FROM trades ORDER BY id")
+    headers = ["id", "pair", "side", "qty", "entry", "exit", "pnl", "status", "ts_open", "ts_close"]
+    import os, csv
+    os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(headers)
+        w.writerows(rows)
+    return filepath
+
+
+# -------------------------------------------------------------------
 # Performance snapshot persistence
 # -------------------------------------------------------------------
-def save_performance_snapshot(pair: str = None, period: str = 'daily'):
-    s = performance_summary(pair, days=30)
+def save_performance_snapshot(user_id: int = None, pair: str = None, period: str = 'daily'):
+    s = performance_summary(user_id, pair, days=30)
     execute(
         """INSERT INTO performance_snapshots(ts, pair, period, total_trades, winning_trades,
-           losing_trades, total_pnl, avg_win, avg_loss, win_rate, expectancy)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+           losing_trades, total_pnl, avg_win, avg_loss, win_rate, expectancy, user_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (int(time.time()), pair or 'ALL', period, s['total_trades'], s['winning'],
-         s['losing'], s['total_pnl'], s['avg_win'], s['avg_loss'], s['win_rate'], s['expectancy'])
+         s['losing'], s['total_pnl'], s['avg_win'], s['avg_loss'], s['win_rate'], s['expectancy'], user_id)
     )
