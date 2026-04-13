@@ -38,6 +38,36 @@ def main_menu_keyboard():
          InlineKeyboardButton("🛑 Sell Now", callback_data="cmd_sellnow")],
         [InlineKeyboardButton("📐 SL / TP / Trail ➤", callback_data="menu_guards_set")],
         [InlineKeyboardButton("❌ Cancel Guards ➤", callback_data="menu_cancel")],
+        [InlineKeyboardButton("📊 Report ➤", callback_data="menu_reporting"),
+         InlineKeyboardButton("🌐 Pairs ➤", callback_data="menu_pairs")],
+        [InlineKeyboardButton("🔧 Admin ➤", callback_data="menu_admin")],
+    ])
+
+def reporting_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Positions", callback_data="cmd_positions"),
+         InlineKeyboardButton("📈 PnL Report", callback_data="cmd_pnl")],
+        [InlineKeyboardButton("📋 Recent Trades", callback_data="cmd_trades"),
+         InlineKeyboardButton("🚫 Blocked", callback_data="cmd_blocked")],
+        [InlineKeyboardButton("📊 Full Report", callback_data="cmd_report")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
+    ])
+
+def pairs_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 List Pairs", callback_data="cmd_pairs"),
+         InlineKeyboardButton("🏆 Ranking", callback_data="cmd_ranking")],
+        [InlineKeyboardButton("➕ Add Pair", callback_data="prompt_addpair"),
+         InlineKeyboardButton("➖ Remove Pair", callback_data="prompt_rmpair")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
+    ])
+
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏥 Health", callback_data="cmd_health"),
+         InlineKeyboardButton("🧠 AI Status", callback_data="cmd_ai")],
+        [InlineKeyboardButton("🔴 Kill Switch", callback_data="cmd_killswitch")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
     ])
 
 def autotrade_keyboard():
@@ -448,6 +478,104 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_manual_guard(uid, SETTINGS.PAIR, "all")
         await query.edit_message_text("✅ All guards cancelled.", reply_markup=back_keyboard())
 
+    # --- Reporting submenu ---
+    elif data == "menu_reporting":
+        await query.edit_message_text("📊 Reports", reply_markup=reporting_keyboard())
+
+    elif data == "cmd_positions":
+        from reports import format_position_report
+        txt = format_position_report()
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_pnl":
+        from reports import format_pnl_report
+        txt = format_pnl_report(days=30)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_trades":
+        from reports import get_recent_closed, format_trades_brief
+        rows = get_recent_closed(n=10)
+        txt = format_trades_brief(rows, "Recent closed")
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_blocked":
+        from reports import blocked_trades_summary
+        txt = blocked_trades_summary(days=7)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_report":
+        from reports import format_pnl_report, daily_report
+        txt = format_pnl_report(days=30) + "\n\n" + daily_report()
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    # --- Pairs submenu ---
+    elif data == "menu_pairs":
+        await query.edit_message_text("🌐 Pair Management", reply_markup=pairs_keyboard())
+
+    elif data == "cmd_pairs":
+        from pair_manager import list_all_pairs
+        pairs = list_all_pairs()
+        if not pairs:
+            txt = "No pairs in watchlist."
+        else:
+            lines = ["Watchlist:"]
+            for p in pairs:
+                status = "✅" if p['active'] else "⛔"
+                sig = f"{p['direction']} ({p['score']:.2f})" if p['direction'] else "—"
+                lines.append(f"{status} {p['pair']} | {sig}")
+            txt = "\n".join(lines)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_ranking":
+        from pair_manager import get_pair_ranking
+        ranking = get_pair_ranking()
+        if not ranking:
+            txt = "No active pairs."
+        else:
+            lines = ["Pair Ranking (by signal strength):"]
+            for i, p in enumerate(ranking, 1):
+                lines.append(f"{i}. {p['pair']} — {p['direction'] or 'HOLD'} ({p['score'] or 0:.2f})")
+            txt = "\n".join(lines)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "prompt_addpair":
+        PENDING_INPUT[uid] = {"type": "addpair", "chat_id": chat_id}
+        await query.edit_message_text("➕ Type the pair to add:\n(e.g. BTC/USDT or ETH/USDC)", reply_markup=back_keyboard())
+
+    elif data == "prompt_rmpair":
+        PENDING_INPUT[uid] = {"type": "rmpair", "chat_id": chat_id}
+        await query.edit_message_text("➖ Type the pair to remove:\n(e.g. BTC/USDT)", reply_markup=back_keyboard())
+
+    # --- Admin submenu ---
+    elif data == "menu_admin":
+        await query.edit_message_text("🔧 Admin", reply_markup=admin_keyboard())
+
+    elif data == "cmd_health":
+        from validators import run_all_checks
+        txt = run_all_checks(SETTINGS)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_ai":
+        row = fetchone("SELECT action, side, confidence, source, fusion_policy, ts FROM ai_decisions ORDER BY id DESC LIMIT 1")
+        if row:
+            txt = (f"🧠 Last AI Decision\n"
+                   f"Action: {row[0]} {row[1] or ''}\n"
+                   f"Confidence: {row[2]:.3f}\n"
+                   f"Source: {row[3]}\n"
+                   f"Policy: {row[4]}")
+        else:
+            txt = "No AI decisions yet."
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+
+    elif data == "cmd_killswitch":
+        if admin_only(uid):
+            import config
+            config.SETTINGS.KILL_SWITCH = not config.SETTINGS.KILL_SWITCH
+            state = "🔴 ON (trading stopped)" if config.SETTINGS.KILL_SWITCH else "🟢 OFF (trading active)"
+            await query.edit_message_text(f"Kill Switch: {state}", reply_markup=back_keyboard())
+        else:
+            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+
 # ---------------------------
 # Text handler for pending input (SL/TP/Trail values)
 # ---------------------------
@@ -458,13 +586,26 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     pending = PENDING_INPUT.pop(uid)
     txt = update.message.text.strip()
+    ptype = pending["type"]
+
+    # Non-numeric inputs
+    if ptype in ("addpair", "rmpair"):
+        if ptype == "addpair":
+            from pair_manager import add_pair
+            ok, msg = add_pair(txt.upper())
+            await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}", reply_markup=back_keyboard())
+        elif ptype == "rmpair":
+            from pair_manager import remove_pair
+            remove_pair(txt.upper())
+            await update.message.reply_text(f"✅ {txt.upper()} removed", reply_markup=back_keyboard())
+        return
+
+    # Numeric inputs
     try:
         val = float(txt)
     except ValueError:
         await update.message.reply_text("❌ Invalid number. Try again from menu.", reply_markup=back_keyboard())
         return
-
-    ptype = pending["type"]
     if ptype == "sl":
         set_manual_guard(uid, SETTINGS.PAIR, sl=val, tp=None, trail_pct=None)
         await update.message.reply_text(f"✅ Stop-Loss set at {val}", reply_markup=back_keyboard())
@@ -629,6 +770,125 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Running analysis...")
     await _do_signal(context.application, update.effective_chat.id, msg.message_id)
 
+# --- New Phase 6-7 commands ---
+async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from reports import format_position_report
+    await update.message.reply_text(format_position_report(), reply_markup=back_keyboard())
+
+async def trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from reports import get_recent_closed, format_trades_brief
+    n = int(context.args[0]) if context.args else 5
+    rows = get_recent_closed(n=n)
+    await update.message.reply_text(format_trades_brief(rows, "Recent closed"), reply_markup=back_keyboard())
+
+async def pnl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from reports import format_pnl_report
+    days = int(context.args[0]) if context.args else 30
+    await update.message.reply_text(format_pnl_report(days=days), reply_markup=back_keyboard())
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from reports import format_pnl_report, daily_report
+    txt = format_pnl_report(days=30) + "\n\n" + daily_report()
+    await update.message.reply_text(txt, reply_markup=back_keyboard())
+
+async def pairs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from pair_manager import list_all_pairs
+    pairs = list_all_pairs()
+    if not pairs:
+        await update.message.reply_text("No pairs.", reply_markup=back_keyboard())
+        return
+    lines = ["Watchlist:"]
+    for p in pairs:
+        s = "✅" if p['active'] else "⛔"
+        sig = f"{p['direction']} ({p['score']:.2f})" if p['direction'] else "—"
+        lines.append(f"{s} {p['pair']} | {sig}")
+    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+
+async def addpair_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /addpair BTC/USDT")
+        return
+    from pair_manager import add_pair
+    ok, msg = add_pair(context.args[0])
+    await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}", reply_markup=back_keyboard())
+
+async def rmpair_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /rmpair BTC/USDT")
+        return
+    from pair_manager import remove_pair
+    remove_pair(context.args[0])
+    await update.message.reply_text(f"✅ {context.args[0].upper()} removed", reply_markup=back_keyboard())
+
+async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from pair_manager import get_pair_ranking
+    ranking = get_pair_ranking()
+    if not ranking:
+        await update.message.reply_text("No active pairs.", reply_markup=back_keyboard())
+        return
+    lines = ["Pair Ranking:"]
+    for i, p in enumerate(ranking, 1):
+        lines.append(f"{i}. {p['pair']} — {p['direction'] or 'HOLD'} ({p['score'] or 0:.2f})")
+    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from validators import run_all_checks
+    await update.message.reply_text(run_all_checks(SETTINGS), reply_markup=back_keyboard())
+
+async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    row = fetchone("SELECT action, side, confidence, source, fusion_policy, ts FROM ai_decisions ORDER BY id DESC LIMIT 1")
+    if row:
+        txt = (f"🧠 Last AI Decision\nAction: {row[0]} {row[1] or ''}\n"
+               f"Confidence: {row[2]:.3f}\nSource: {row[3]}\nPolicy: {row[4]}")
+    else:
+        txt = "No AI decisions yet."
+    await update.message.reply_text(txt, reply_markup=back_keyboard())
+
+async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.")
+        return
+    import config
+    config.SETTINGS.KILL_SWITCH = not config.SETTINGS.KILL_SWITCH
+    state = "🔴 ON (trading stopped)" if config.SETTINGS.KILL_SWITCH else "🟢 OFF (trading active)"
+    await update.message.reply_text(f"Kill Switch: {state}", reply_markup=back_keyboard())
+
+async def blocked_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from reports import blocked_trades_summary
+    days = int(context.args[0]) if context.args else 7
+    await update.message.reply_text(blocked_trades_summary(days), reply_markup=back_keyboard())
+
+# ---------------------------
+# Startup validation
+# ---------------------------
+async def post_init(application):
+    """Run on bot startup: validate config, seed pairs, notify admin."""
+    from storage import init_db
+    from validators import run_all_checks
+    from pair_manager import seed_default_pair
+
+    init_db()
+    seed_default_pair()
+
+    # Store startup time
+    try:
+        execute(
+            "INSERT INTO bot_state(key, value, updated_ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            ('last_startup', str(int(time.time())), int(time.time()))
+        )
+    except Exception:
+        pass
+
+    # Send startup summary to admins
+    summary = run_all_checks(SETTINGS)
+    for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
+        try:
+            await application.bot.send_message(chat_id=aid, text=f"🟢 Bot Started\n\n{summary}")
+        except Exception as e:
+            log.warning("Startup notify failed for %s: %s", aid, e)
+
 # ---------------------------
 # App builder + jobs
 # ---------------------------
@@ -639,9 +899,10 @@ def build_app() -> Application:
         os.environ["HTTPS_PROXY"] = SETTINGS.HTTPS_PROXY
         os.environ["HTTP_PROXY"] = SETTINGS.HTTPS_PROXY
 
+    b.post_init(post_init)
     app = b.build()
 
-    # Command handlers
+    # --- Original command handlers ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -660,20 +921,34 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("checkguards", checkguards))
     app.add_handler(CommandHandler("price", price))
 
+    # --- New Phase 5-7 commands ---
+    app.add_handler(CommandHandler("positions", positions_cmd))
+    app.add_handler(CommandHandler("trades", trades_cmd))
+    app.add_handler(CommandHandler("pnl", pnl_cmd))
+    app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("pairs", pairs_cmd))
+    app.add_handler(CommandHandler("addpair", addpair_cmd))
+    app.add_handler(CommandHandler("rmpair", rmpair_cmd))
+    app.add_handler(CommandHandler("ranking", ranking_cmd))
+    app.add_handler(CommandHandler("health", health_cmd))
+    app.add_handler(CommandHandler("ai", ai_cmd))
+    app.add_handler(CommandHandler("killswitch", killswitch_cmd))
+    app.add_handler(CommandHandler("blocked", blocked_cmd))
+
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Text handler for pending SL/TP/Trail input
+    # Text handler for pending input
     from telegram.ext import MessageHandler, filters
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler))
 
     # Main strategy jobs
     schedule_jobs(app)
 
-    # Auto-Exit guard job every 30s
+    # Auto-Exit guard job
     async def _guard_job(context):
         await auto_exit_task(context.application)
 
-    app.job_queue.run_repeating(_guard_job, interval=30, first=15, name="auto_exit_guard")
+    app.job_queue.run_repeating(_guard_job, interval=SETTINGS.GUARD_CHECK_INTERVAL_SECONDS, first=15, name="auto_exit_guard")
 
     return app

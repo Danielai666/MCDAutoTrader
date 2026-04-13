@@ -9,3 +9,19 @@ def market_price(pair):
 def place_market_order(pair,side,amount):
     if SETTINGS.PAPER_TRADING: return {'id':f'paper-{pair}-{side}','status':'filled','side':side,'amount':amount}
     ex=get_client(); return ex.create_order(symbol=pair,type='market',side=side.lower(),amount=amount)
+
+def health_check():
+    """Check exchange connectivity. Returns (ok, message)."""
+    try:
+        ex=get_client(); ex.fetch_time()
+        return True, f'{SETTINGS.EXCHANGE} OK'
+    except Exception as e:
+        return False, f'{SETTINGS.EXCHANGE} error: {e}'
+
+def validate_pair_on_exchange(pair):
+    """Check if pair exists on exchange."""
+    try:
+        ex=get_client(); ex.load_markets()
+        return pair in ex.markets
+    except Exception:
+        return False
