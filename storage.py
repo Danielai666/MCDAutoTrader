@@ -197,6 +197,7 @@ def _init_sqlite():
     with _sqlite_lock:
         conn.executescript(SQLITE_SCHEMA)
         _migrate_sqlite_trades(conn)
+        _migrate_multi_tenant(conn)
         conn.commit()
 
 
@@ -218,16 +219,118 @@ def _migrate_sqlite_trades(conn):
         pass
 
 
+def _get_platform_owner_id() -> int:
+    """Return the first admin ID as the platform owner. Used for migration defaults."""
+    if SETTINGS.TELEGRAM_ADMIN_IDS:
+        return SETTINGS.TELEGRAM_ADMIN_IDS[0]
+    return 0
+
+
+def _migrate_multi_tenant(conn):
+    """Idempotent migration: add user_id to tables + per-user settings columns."""
+    owner_id = _get_platform_owner_id()
+
+    # Add user_id to data tables (existing rows get owner_id)
+    for table in ['trades', 'signals', 'ai_decisions', 'blocked_trades',
+                  'performance_snapshots']:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER DEFAULT {owner_id}")
+        except Exception:
+            pass
+
+    # trading_pairs: add user_id (can't change PK in SQLite, so add column + unique index)
+    try:
+        conn.execute(f"ALTER TABLE trading_pairs ADD COLUMN user_id INTEGER DEFAULT {owner_id}")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trading_pairs_user_pair ON trading_pairs(user_id, pair)")
+    except Exception:
+        pass
+
+    # bot_state: add user_id (NULL = global, non-NULL = per-user)
+    try:
+        conn.execute("ALTER TABLE bot_state ADD COLUMN user_id INTEGER")
+    except Exception:
+        pass
+
+    # Per-user settings columns on users table
+    for col, typedef in [
+        ('capital_usd', 'REAL DEFAULT 1000.0'),
+        ('risk_per_trade', 'REAL DEFAULT 0.01'),
+        ('exchange_key_enc', 'TEXT'),
+        ('exchange_secret_enc', 'TEXT'),
+        ('exchange_name', "TEXT DEFAULT 'kraken'"),
+        ('paper_trading', 'INTEGER DEFAULT 1'),
+        ('max_portfolio_exposure', 'REAL DEFAULT 0.50'),
+        ('capital_per_trade_pct', 'REAL DEFAULT 0.10'),
+        ('ai_fusion_policy', "TEXT DEFAULT 'local_only'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
+
+    # Indexes for performance
+    for table in ['trades', 'signals', 'ai_decisions', 'blocked_trades']:
+        try:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_user_id ON {table}(user_id)")
+        except Exception:
+            pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status)")
+    except Exception:
+        pass
+
+
 def _init_postgres():
-    """Initialize PostgreSQL schema — idempotent."""
+    """Initialize PostgreSQL schema + multi-tenant migration — idempotent."""
     conn = _get_pg_conn()
     try:
         cur = conn.cursor()
+        # Base schema
         schema_sql = POSTGRES_SCHEMA.format(schema=SETTINGS.SUPABASE_SCHEMA)
         for statement in schema_sql.split(';'):
             stmt = statement.strip()
             if stmt:
                 cur.execute(stmt)
+        conn.commit()
+
+        # Multi-tenant migration (add user_id columns, per-user settings)
+        owner_id = _get_platform_owner_id()
+        migration_stmts = []
+        for table in ['trades', 'signals', 'ai_decisions', 'blocked_trades',
+                      'performance_snapshots']:
+            migration_stmts.append(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS user_id BIGINT DEFAULT {owner_id}")
+        migration_stmts.append(
+            f"ALTER TABLE trading_pairs ADD COLUMN IF NOT EXISTS user_id BIGINT DEFAULT {owner_id}")
+        migration_stmts.append(
+            "ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS user_id BIGINT")
+        for col, typedef in [
+            ('capital_usd', 'DOUBLE PRECISION DEFAULT 1000.0'),
+            ('risk_per_trade', 'DOUBLE PRECISION DEFAULT 0.01'),
+            ('exchange_key_enc', 'TEXT'),
+            ('exchange_secret_enc', 'TEXT'),
+            ('exchange_name', "TEXT DEFAULT 'kraken'"),
+            ('paper_trading', 'INTEGER DEFAULT 1'),
+            ('max_portfolio_exposure', 'DOUBLE PRECISION DEFAULT 0.50'),
+            ('capital_per_trade_pct', 'DOUBLE PRECISION DEFAULT 0.10'),
+            ('ai_fusion_policy', "TEXT DEFAULT 'local_only'"),
+        ]:
+            migration_stmts.append(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}")
+        # Indexes
+        for table in ['trades', 'signals', 'ai_decisions', 'blocked_trades']:
+            migration_stmts.append(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_user_id ON {table}(user_id)")
+        migration_stmts.append(
+            "CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status)")
+
+        for stmt in migration_stmts:
+            try:
+                cur.execute(stmt)
+            except Exception as e:
+                log.debug("PG migration skip: %s", e)
         conn.commit()
         log.info("PostgreSQL schema verified: %s", SETTINGS.SUPABASE_SCHEMA)
     except Exception as e:

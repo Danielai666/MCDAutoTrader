@@ -152,4 +152,7 @@ class Settings:
     KRAKEN_API_KEY: str = os.getenv('KRAKEN_API_KEY', '')
     KRAKEN_API_SECRET: str = os.getenv('KRAKEN_API_SECRET', '')
 
+    # --- Credential encryption (for multi-user exchange key storage) ---
+    CREDENTIAL_ENCRYPTION_KEY: str = os.getenv('CREDENTIAL_ENCRYPTION_KEY', '')
+
 SETTINGS = Settings()
