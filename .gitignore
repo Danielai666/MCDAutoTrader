@@ -21,3 +21,4 @@ bot.db-*
 bot.db
 bot.db-*
 .venv_broken/
+env.
