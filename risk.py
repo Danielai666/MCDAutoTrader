@@ -206,8 +206,9 @@ def portfolio_exposure_check() -> tuple:
 # -------------------------------------------------------------------
 def confidence_scaled_position_size(price: float, atr_value: float,
                                      confidence: float, setup_quality: float,
-                                     remaining_capital: float) -> float:
-    """Position size scaled by confidence and quality, capped by capital limits."""
+                                     remaining_capital: float,
+                                     dd_scale: float = None) -> float:
+    """Position size scaled by confidence, quality, and drawdown. Pass dd_scale to avoid redundant API calls."""
     if atr_value <= 0 or price <= 0:
         return 0.0
     base_qty = position_size(price, atr_value)
@@ -215,8 +216,8 @@ def confidence_scaled_position_size(price: float, atr_value: float,
     conf_normalized = max(0, min(1, (confidence - SETTINGS.AI_CONFIDENCE_MIN) / conf_range))
     conf_factor = SETTINGS.CONFIDENCE_SCALE_MIN + conf_normalized * (SETTINGS.CONFIDENCE_SCALE_MAX - SETTINGS.CONFIDENCE_SCALE_MIN)
     quality_bonus = min(1.2, 1.0 + setup_quality * 0.2)
-    # Apply drawdown scaling
-    dd_scale = drawdown_position_scale()
+    if dd_scale is None:
+        dd_scale = drawdown_position_scale()
     scaled_qty = base_qty * conf_factor * quality_bonus * dd_scale
     max_by_capital = (SETTINGS.CAPITAL_PER_TRADE_PCT * SETTINGS.CAPITAL_USD) / price
     max_by_remaining = remaining_capital / price

@@ -47,8 +47,17 @@ async def _compute_signals(pair: str = None) -> Dict:
     pair = pair or SETTINGS.PAIR
     sigs = {}
     for tf in SETTINGS.TIMEFRAMES:
-        df = fetch_ohlcv(pair, tf, SETTINGS.CANDLE_LIMIT)
-        sigs[tf] = tf_signal(df, symbol=pair, timeframe=tf)
+        try:
+            df = fetch_ohlcv(pair, tf, SETTINGS.CANDLE_LIMIT)
+            if df is None or df.empty:
+                log.warning("Empty OHLCV for %s %s, skipping timeframe", pair, tf)
+                continue
+            sigs[tf] = tf_signal(df, symbol=pair, timeframe=tf)
+        except Exception as e:
+            log.warning("Signal computation failed for %s %s: %s", pair, tf, e)
+            continue
+    if not sigs:
+        return {'pair': pair, 'by_tf': {}, 'merged': {'merged_direction': 'HOLD', 'merged_score': 0, 'regime': 'HOLD'}, 'breakdown': {}}
     merged = merge_mtf(sigs)
     breakdown = build_score_breakdown(sigs, merged)
     return {'pair': pair, 'by_tf': sigs, 'merged': merged, 'breakdown': breakdown}
@@ -103,6 +112,14 @@ async def _analyze_pair(app: Application, pair: str) -> dict:
 async def _execute_autonomous_cycle(app: Application, pair_results: list) -> list:
     """Process all analyzed pairs: exits first, then ranked entries. Returns action log."""
     action_log = []
+
+    # Cache equity/drawdown once per cycle to avoid redundant market_price() calls
+    try:
+        _cached_equity = get_equity_status()
+        _cached_dd_scale = drawdown_position_scale()
+    except Exception:
+        _cached_equity = None
+        _cached_dd_scale = 1.0
 
     # 1. Process EXITs first (free up capital/slots)
     for r in pair_results:
@@ -168,8 +185,8 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
         if atr_val <= 0 or px <= 0:
             continue
 
-        # Confidence-scaled position size
-        qty = confidence_scaled_position_size(px, atr_val, dec['confidence'], setup_quality, remaining_usd)
+        # Confidence-scaled position size (use cached dd_scale to avoid redundant API calls)
+        qty = confidence_scaled_position_size(px, atr_val, dec['confidence'], setup_quality, remaining_usd, dd_scale=_cached_dd_scale)
         if qty <= 0:
             action_log.append(f"SKIP {pair_name}: qty=0 after scaling")
             continue

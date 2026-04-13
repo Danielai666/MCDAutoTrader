@@ -149,17 +149,13 @@ def _get_admin_id() -> Optional[int]:
 # ---------------------------
 # Auto-Exit logic (built-in)
 # ---------------------------
-def _fetch_last_price() -> Optional[float]:
+def _fetch_last_price(pair: str = None) -> Optional[float]:
+    pair = pair or SETTINGS.PAIR
     try:
-        import ccxt
-        ex = ccxt.kraken()
-        t = ex.fetch_ticker(SETTINGS.PAIR)
-        for k in ("last", "close", "bid", "ask"):
-            v = t.get(k)
-            if isinstance(v, (int, float)) and v > 0:
-                return float(v)
+        from exchange import market_price
+        return market_price(pair)
     except Exception as e:
-        log.warning("auto-exit: fetch price failed: %s", e)
+        log.warning("auto-exit: fetch price failed for %s: %s", pair, e)
     return None
 
 def _load_guard(uid: int, pair: str):
@@ -253,12 +249,29 @@ def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
 
 
 async def auto_exit_task(application) -> None:
+    """Check guards for ALL pairs with open trades, not just the primary pair."""
     admin_id = _get_admin_id()
-    pair = SETTINGS.PAIR
     if not admin_id:
         return
 
-    price = _fetch_last_price()
+    # Get all distinct pairs with open trades
+    rows = fetchall("SELECT DISTINCT pair FROM trades WHERE status='OPEN'")
+    pairs_to_check = [r[0] for r in rows] if rows else []
+
+    # Also check the primary pair (may have guards without open trades)
+    if SETTINGS.PAIR not in pairs_to_check:
+        pairs_to_check.append(SETTINGS.PAIR)
+
+    for pair in pairs_to_check:
+        try:
+            await _check_pair_guards(application, admin_id, pair)
+        except Exception as e:
+            log.warning("auto-exit check failed for %s: %s", pair, e)
+
+
+async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
+    """Check all guard types for a single pair."""
+    price = _fetch_last_price(pair)
     if not price or price <= 0:
         return
 
@@ -268,10 +281,22 @@ async def auto_exit_task(application) -> None:
     if guard:
         sl = guard.get("sl")
         tp = guard.get("tp")
-        if isinstance(sl, (int, float)) and price <= float(sl):
-            reason = f"SL hit @ {float(sl):g} (px={price:g})"
-        if not reason and isinstance(tp, (int, float)) and price >= float(tp):
-            reason = f"TP hit @ {float(tp):g} (px={price:g})"
+
+        # Determine trade direction for correct SL/TP comparison
+        open_trades = fetchall("SELECT side FROM trades WHERE status='OPEN' AND pair=?", (pair,))
+        is_long = any(r[0] == 'BUY' for r in open_trades) if open_trades else True
+
+        if isinstance(sl, (int, float)):
+            if is_long and price <= float(sl):
+                reason = f"SL hit @ {float(sl):g} (px={price:g})"
+            elif not is_long and price >= float(sl):
+                reason = f"SL hit @ {float(sl):g} (px={price:g})"
+
+        if not reason and isinstance(tp, (int, float)):
+            if is_long and price >= float(tp):
+                reason = f"TP hit @ {float(tp):g} (px={price:g})"
+            elif not is_long and price <= float(tp):
+                reason = f"TP hit @ {float(tp):g} (px={price:g})"
 
         trail_pct = guard.get("trail_pct")
         if not reason and isinstance(trail_pct, (int, float)) and float(trail_pct) > 0:
@@ -286,7 +311,7 @@ async def auto_exit_task(application) -> None:
             if trail_stop is not None and price <= float(trail_stop):
                 reason = f"TRAIL stop hit @ {float(trail_stop):g} (px={price:g})"
             elif updated:
-                log.info("auto-exit: trail updated high=%.6f stop=%.6f", high_wm, trail_stop or -1)
+                log.info("auto-exit: %s trail updated high=%.6f stop=%.6f", pair, high_wm, trail_stop or -1)
 
     # --- Check ATR-based trailing stops for open trades ---
     if not reason:
@@ -295,6 +320,7 @@ async def auto_exit_task(application) -> None:
     if not reason:
         return
 
+    # Dedup notification
     key = (admin_id, pair, reason)
     now_ts = int(time.time())
     last_ts = LAST_NOTIFY.get(key, 0)
@@ -302,6 +328,7 @@ async def auto_exit_task(application) -> None:
         return
     LAST_NOTIFY[key] = now_ts
 
+    # Execute close
     closed = 0
     total_pnl = None
     try:
@@ -310,8 +337,9 @@ async def auto_exit_task(application) -> None:
         else:
             closed = close_all_for_pair(pair, f"auto_exit: {reason}") or 0
     except Exception as e:
-        log.exception("auto-exit: closing failed: %s", e)
+        log.exception("auto-exit: closing failed for %s: %s", pair, e)
 
+    # Notify
     try:
         lines = [
             "Auto-Exit Triggered",
@@ -324,7 +352,7 @@ async def auto_exit_task(application) -> None:
             lines.append(f"PnL (paper): {total_pnl:.2f}")
         await application.bot.send_message(chat_id=admin_id, text="\n".join(lines))
     except Exception as e:
-        log.warning("auto-exit: notify failed: %s", e)
+        log.warning("auto-exit: notify failed for %s: %s", pair, e)
 
 # ---------------------------
 # Commands (also used by callbacks)
