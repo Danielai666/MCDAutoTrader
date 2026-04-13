@@ -1,2 +1,2 @@
 def placeholder():
- return True
+    return True
