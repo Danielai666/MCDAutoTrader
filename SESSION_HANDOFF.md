@@ -4,8 +4,8 @@
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Repository: `MCDAutoTrader`
 > Date: 2026-04-13
-> Total: 34 Python files, 9,528 lines of code
-> Latest commit: `8adcb09`
+> Total: 39 Python files, 10,632 lines of code (including 748 lines of tests)
+> Latest commit: `1959706` (Test suite + /backtest command)
 
 ---
 
