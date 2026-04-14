@@ -1521,6 +1521,88 @@ async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(l for l in lines if l), reply_markup=back_keyboard())
 
 
+# ---------------------------
+# Screenshot analysis commands
+# ---------------------------
+async def analyze_screens_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start a screenshot analysis session. Usage: /analyze_screens"""
+    if not SETTINGS.FEATURE_SCREENSHOTS:
+        await update.message.reply_text("Screenshot analysis is not enabled.", reply_markup=back_keyboard())
+        return
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    from screenshot_analyzer import start_session
+    session = start_session(uid, chat_id)
+    await update.message.reply_text(
+        f"Screenshot analysis session started.\n"
+        f"Send up to {SETTINGS.SCREENSHOT_MAX_IMAGES} chart screenshots.\n"
+        f"When done, send /done to trigger analysis.\n"
+        f"Session expires in 10 minutes.",
+        reply_markup=back_keyboard())
+
+
+async def screenshot_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming photos during an active screenshot session."""
+    uid = update.effective_user.id
+    from screenshot_analyzer import get_session, add_image
+    session = get_session(uid)
+    if not session:
+        return  # No active session, ignore photos
+
+    # Download the photo
+    photo = update.message.photo[-1]  # Highest resolution
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        file_path = os.path.join(session.temp_dir, f"chart_{session.image_count + 1}.jpg")
+        await file.download_to_drive(file_path)
+
+        if add_image(uid, file_path):
+            remaining = SETTINGS.SCREENSHOT_MAX_IMAGES - session.image_count
+            await update.message.reply_text(
+                f"Image {session.image_count} received. "
+                f"{remaining} remaining. Send /done when ready.")
+        else:
+            await update.message.reply_text(
+                f"Maximum {SETTINGS.SCREENSHOT_MAX_IMAGES} images reached. Send /done to analyze.")
+    except Exception as e:
+        log.error("Failed to download screenshot: %s", e)
+        await update.message.reply_text("Failed to download image. Try again.")
+
+
+async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger analysis of collected screenshots. Usage: /done"""
+    uid = update.effective_user.id
+    from screenshot_analyzer import get_session, end_session, analyze_screenshots, format_analysis_result
+    session = get_session(uid)
+    if not session:
+        await update.message.reply_text("No active screenshot session. Use /analyze_screens first.",
+                                        reply_markup=back_keyboard())
+        return
+
+    if session.image_count == 0:
+        await update.message.reply_text("No images received. Send screenshots first.",
+                                        reply_markup=back_keyboard())
+        return
+
+    msg = await update.message.reply_text(
+        f"Analyzing {session.image_count} screenshot(s)... This may take a moment.")
+
+    try:
+        result = await analyze_screenshots(session)
+        text = format_analysis_result(result)
+
+        # Truncate if too long for Telegram
+        if len(text) > 4000:
+            text = text[:3950] + "\n...(truncated)"
+
+        await msg.edit_text(text, reply_markup=back_keyboard())
+    except Exception as e:
+        log.error("Screenshot analysis failed: %s", e)
+        await msg.edit_text(f"Analysis failed: {e}", reply_markup=back_keyboard())
+    finally:
+        end_session(uid)
+
+
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exchange reconciliation. Usage: /reconcile [fix]"""
     uid = update.effective_user.id
@@ -1676,6 +1758,13 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("setkeys", setkeys_cmd))
     app.add_handler(CommandHandler("myaccount", myaccount_cmd))
     app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
+
+    # --- Screenshot analysis ---
+    app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))
+    app.add_handler(CommandHandler("done", rate_limited(done_cmd)))
+    # Photo handler for screenshots (must be after other handlers)
+    from telegram.ext import MessageHandler, filters as tg_filters
+    app.add_handler(MessageHandler(tg_filters.PHOTO, screenshot_photo_handler))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))
