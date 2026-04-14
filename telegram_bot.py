@@ -1513,6 +1513,16 @@ async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
+async def health_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show health telemetry counters."""
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        await update.message.reply_text("Not allowed.", reply_markup=back_keyboard())
+        return
+    from health_telemetry import format_health_stats
+    await update.message.reply_text(format_health_stats(), reply_markup=back_keyboard())
+
+
 async def visual_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show visual settings menu."""
     uid = update.effective_user.id
@@ -1761,6 +1771,13 @@ async def post_init(application):
     if recovered > 0:
         log.warning("Recovered %d PENDING trades on startup", recovered)
 
+    # 4b. Load health telemetry from previous run
+    try:
+        from health_telemetry import load_from_db
+        load_from_db()
+    except Exception:
+        pass
+
     # 5. Record startup and trade state
     now = int(time.time())
     try:
@@ -1845,6 +1862,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("myaccount", myaccount_cmd))
     app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
     app.add_handler(CommandHandler("backtest", rate_limited(backtest_cmd)))
+    app.add_handler(CommandHandler("health_stats", rate_limited(health_stats_cmd)))
     app.add_handler(CommandHandler("visuals", rate_limited(visual_settings_cmd)))
 
     # --- Screenshot analysis ---

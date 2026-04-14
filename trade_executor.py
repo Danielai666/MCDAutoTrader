@@ -126,6 +126,11 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
         if existing:
             log.info("Idempotent skip: operation %s already executed", operation_id)
             try:
+                import health_telemetry as ht
+                ht.increment('idempotency_rejects')
+            except Exception:
+                pass
+            try:
                 return _json.loads(existing['result_json'])
             except Exception:
                 return {'success': True, 'trade_id': 0, 'order_id': 'idempotent',

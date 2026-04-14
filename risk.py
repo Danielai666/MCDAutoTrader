@@ -192,6 +192,11 @@ def can_enter_enhanced(pair: str, side: str, signal_snapshot: dict = None, ctx=N
 
 def _log_blocked(pair: str, side: str, reason: str, snapshot: dict = None, user_id: int = None):
     try:
+        import health_telemetry as ht
+        ht.record_blocked_trade(reason)
+    except Exception:
+        pass
+    try:
         execute(
             'INSERT INTO blocked_trades(ts, pair, side, reason, signal_snapshot, user_id) VALUES(?,?,?,?,?,?)',
             (int(time.time()), pair, side, reason, json.dumps(snapshot) if snapshot else None, user_id)

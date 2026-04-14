@@ -477,9 +477,18 @@ def schedule_jobs(app: Application):
     async def analysis_job(ctx):
         async def _run():
             try:
+                import health_telemetry as ht
+                _t0 = time.time()
                 await run_cycle_once(app, notify=True)
+                ht.record_cycle(int((time.time() - _t0) * 1000))
+                ht.flush_to_db()
             except Exception as e:
                 log.exception("Analysis cycle error: %s", e)
+                try:
+                    import health_telemetry as ht
+                    ht.increment('scheduler_errors')
+                except Exception:
+                    pass
                 for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
                     try:
                         await app.bot.send_message(chat_id=aid, text=f'Scheduler error: {e}')
