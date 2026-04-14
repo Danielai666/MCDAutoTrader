@@ -961,6 +961,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "confirm_skip":
         await query.edit_message_text("Trade skipped.", reply_markup=back_keyboard())
 
+    # --- Visual settings toggles ---
+    elif data.startswith("vtoggle_"):
+        field = data.replace("vtoggle_", "")
+        from storage import get_user_settings, upsert_user_settings
+        settings = get_user_settings(uid) or {}
+        current = bool(settings.get(field, 1))
+        upsert_user_settings(uid, **{field: 0 if current else 1})
+        new_val = "ON" if not current else "OFF"
+        await query.edit_message_text(f"{field}: {new_val}", reply_markup=back_keyboard())
+
+    elif data.startswith("vcycle_"):
+        field = data.replace("vcycle_", "")
+        from storage import get_user_settings, upsert_user_settings
+        settings = get_user_settings(uid) or {}
+        if field == 'visuals_style':
+            options = ['dark', 'classic', 'high_contrast']
+            current = settings.get('visuals_style', 'dark')
+            idx = (options.index(current) + 1) % len(options) if current in options else 0
+            upsert_user_settings(uid, visuals_style=options[idx])
+            await query.edit_message_text(f"Style: {options[idx]}", reply_markup=back_keyboard())
+        elif field == 'visuals_density':
+            options = ['compact', 'detailed']
+            current = settings.get('visuals_density', 'detailed')
+            idx = (options.index(current) + 1) % len(options) if current in options else 0
+            upsert_user_settings(uid, visuals_density=options[idx])
+            await query.edit_message_text(f"Density: {options[idx]}", reply_markup=back_keyboard())
+
     # --- Connect Exchange flow ---
     elif data == "cmd_connect":
         session = ConnectSession(state=ConnectState.SELECT_EXCHANGE, started_ts=time.time())
@@ -1486,6 +1513,29 @@ async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
+async def visual_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show visual settings menu."""
+    uid = update.effective_user.id
+    from user_context import UserContext
+    ctx = UserContext.load(uid)
+
+    def _icon(val): return 'ON' if val else 'OFF'
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Visuals: {_icon(ctx.visuals_enabled)}", callback_data="vtoggle_visuals_enabled"),
+         InlineKeyboardButton(f"Style: {ctx.visuals_style}", callback_data="vcycle_visuals_style")],
+        [InlineKeyboardButton(f"Density: {ctx.visuals_density}", callback_data="vcycle_visuals_density")],
+        [InlineKeyboardButton(f"RSI: {_icon(ctx.show_rsi)}", callback_data="vtoggle_show_rsi"),
+         InlineKeyboardButton(f"MACD: {_icon(ctx.show_macd)}", callback_data="vtoggle_show_macd")],
+        [InlineKeyboardButton(f"Ichimoku: {_icon(ctx.show_ichimoku)}", callback_data="vtoggle_show_ichimoku"),
+         InlineKeyboardButton(f"Volume: {_icon(ctx.show_volume)}", callback_data="vtoggle_show_volume")],
+        [InlineKeyboardButton(f"Divergence Marks: {_icon(ctx.show_divergence_marks)}", callback_data="vtoggle_show_divergence_marks"),
+         InlineKeyboardButton(f"S/R Levels: {_icon(ctx.show_levels)}", callback_data="vtoggle_show_levels")],
+        [InlineKeyboardButton("Back", callback_data="cmd_menu")],
+    ])
+    await update.message.reply_text("Visual Settings", reply_markup=kb)
+
+
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run backtest. Usage: /backtest <pair> [days] [timeframe]
     Example: /backtest BTC/USDT 30 1h"""
@@ -1795,6 +1845,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("myaccount", myaccount_cmd))
     app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
     app.add_handler(CommandHandler("backtest", rate_limited(backtest_cmd)))
+    app.add_handler(CommandHandler("visuals", rate_limited(visual_settings_cmd)))
 
     # --- Screenshot analysis ---
     app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))

@@ -393,6 +393,26 @@ def _migrate_multi_tenant(conn):
     except Exception:
         pass
 
+    # Visual settings columns on user_settings
+    for col, typedef in [
+        ('visuals_enabled', 'INTEGER DEFAULT 1'),
+        ('visuals_style', "TEXT DEFAULT 'dark'"),
+        ('visuals_density', "TEXT DEFAULT 'detailed'"),
+        ('show_indicators', 'INTEGER DEFAULT 1'),
+        ('show_ichimoku', 'INTEGER DEFAULT 1'),
+        ('show_rsi', 'INTEGER DEFAULT 1'),
+        ('show_macd', 'INTEGER DEFAULT 1'),
+        ('show_levels', 'INTEGER DEFAULT 0'),
+        ('show_divergence_marks', 'INTEGER DEFAULT 1'),
+        ('show_volume', 'INTEGER DEFAULT 0'),
+        ('chart_timeframes_json', "TEXT DEFAULT '[\"15m\",\"1h\",\"4h\",\"1d\"]'"),
+        ('setup_completed_json', 'TEXT'),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE user_settings ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
+
 
 def _init_postgres():
     """Initialize PostgreSQL schema + multi-tenant migration — idempotent."""
@@ -436,6 +456,22 @@ def _init_postgres():
                 f"CREATE INDEX IF NOT EXISTS idx_{table}_user_id ON {table}(user_id)")
         migration_stmts.append(
             "CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status)")
+        # Visual settings columns
+        for col, typedef in [
+            ('visuals_enabled', 'INTEGER DEFAULT 1'),
+            ('visuals_style', "TEXT DEFAULT 'dark'"),
+            ('visuals_density', "TEXT DEFAULT 'detailed'"),
+            ('show_indicators', 'INTEGER DEFAULT 1'),
+            ('show_ichimoku', 'INTEGER DEFAULT 1'),
+            ('show_rsi', 'INTEGER DEFAULT 1'),
+            ('show_macd', 'INTEGER DEFAULT 1'),
+            ('show_levels', 'INTEGER DEFAULT 0'),
+            ('show_divergence_marks', 'INTEGER DEFAULT 1'),
+            ('show_volume', 'INTEGER DEFAULT 0'),
+            ('chart_timeframes_json', "TEXT DEFAULT '[\"15m\",\"1h\",\"4h\",\"1d\"]'"),
+            ('setup_completed_json', 'TEXT'),
+        ]:
+            migration_stmts.append(f"ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS {col} {typedef}")
 
         for stmt in migration_stmts:
             try:
@@ -757,10 +793,13 @@ def delete_credential(user_id: int, provider_type: str, exchange_id: str):
 # User settings helpers
 # -------------------------------------------------------------------
 def get_user_settings(user_id: int) -> dict:
-    """Get user settings. Returns dict or None."""
+    """Get user settings including visual preferences. Returns dict or None."""
     row = fetchone(
         "SELECT mode, ai_mode, default_provider, default_exchange, allowed_symbols_json, "
-        "timeframe_policy, timezone, panic_stop "
+        "timeframe_policy, timezone, panic_stop, "
+        "visuals_enabled, visuals_style, visuals_density, show_indicators, "
+        "show_ichimoku, show_rsi, show_macd, show_levels, show_divergence_marks, "
+        "show_volume, chart_timeframes_json, setup_completed_json "
         "FROM user_settings WHERE user_id=?", (user_id,))
     if not row:
         return None
@@ -768,8 +807,23 @@ def get_user_settings(user_id: int) -> dict:
         'mode': row[0], 'ai_mode': row[1], 'default_provider': row[2],
         'default_exchange': row[3], 'allowed_symbols_json': row[4],
         'timeframe_policy': row[5], 'timezone': row[6], 'panic_stop': row[7],
+        'visuals_enabled': row[8], 'visuals_style': row[9],
+        'visuals_density': row[10], 'show_indicators': row[11],
+        'show_ichimoku': row[12], 'show_rsi': row[13],
+        'show_macd': row[14], 'show_levels': row[15],
+        'show_divergence_marks': row[16], 'show_volume': row[17],
+        'chart_timeframes_json': row[18], 'setup_completed_json': row[19],
     }
 
+
+_SETTINGS_ALLOWED_KEYS = (
+    'mode', 'ai_mode', 'default_provider', 'default_exchange',
+    'allowed_symbols_json', 'timeframe_policy', 'timezone', 'panic_stop',
+    'visuals_enabled', 'visuals_style', 'visuals_density',
+    'show_indicators', 'show_ichimoku', 'show_rsi', 'show_macd',
+    'show_levels', 'show_divergence_marks', 'show_volume',
+    'chart_timeframes_json', 'setup_completed_json',
+)
 
 def upsert_user_settings(user_id: int, **kwargs):
     """Update user settings. Only updates provided fields."""
@@ -780,8 +834,7 @@ def upsert_user_settings(user_id: int, **kwargs):
         sets = []
         vals = []
         for k, v in kwargs.items():
-            if k in ('mode', 'ai_mode', 'default_provider', 'default_exchange',
-                     'allowed_symbols_json', 'timeframe_policy', 'timezone', 'panic_stop'):
+            if k in _SETTINGS_ALLOWED_KEYS:
                 sets.append(f"{k}=?")
                 vals.append(v)
         if sets:
@@ -793,8 +846,7 @@ def upsert_user_settings(user_id: int, **kwargs):
         cols = ['user_id', 'updated_ts']
         vals = [user_id, now]
         for k, v in kwargs.items():
-            if k in ('mode', 'ai_mode', 'default_provider', 'default_exchange',
-                     'allowed_symbols_json', 'timeframe_policy', 'timezone', 'panic_stop'):
+            if k in _SETTINGS_ALLOWED_KEYS:
                 cols.append(k)
                 vals.append(v)
         placeholders = ','.join(['?'] * len(cols))

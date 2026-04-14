@@ -37,9 +37,21 @@ class UserContext:
     ai_fusion_policy: str = 'local_only'
 
     # Mode system
-    mode: str = 'signal_only'         # signal_only | paper | live
-    ai_mode: str = 'signal_only'      # signal_only | manual_confirm | ai_full
+    mode: str = 'signal_only'
+    ai_mode: str = 'signal_only'
     panic_stopped: bool = False
+
+    # Visual settings
+    visuals_enabled: bool = True
+    visuals_style: str = 'dark'
+    visuals_density: str = 'detailed'
+    show_indicators: bool = True
+    show_ichimoku: bool = True
+    show_rsi: bool = True
+    show_macd: bool = True
+    show_levels: bool = False
+    show_divergence_marks: bool = True
+    show_volume: bool = False
 
     @classmethod
     def load(cls, user_id: int) -> 'UserContext':
@@ -104,9 +116,19 @@ class UserContext:
                 ctx.panic_stopped = bool(settings.get('panic_stop'))
                 if settings.get('default_exchange'):
                     ctx.exchange_name = settings['default_exchange']
-                # Derive paper_trading from mode
                 ctx.paper_trading = ctx.mode != 'live'
                 ctx.trade_mode = 'LIVE' if ctx.mode == 'live' else 'PAPER'
+                # Visual settings
+                if settings.get('visuals_enabled') is not None:
+                    ctx.visuals_enabled = bool(settings['visuals_enabled'])
+                if settings.get('visuals_style'):
+                    ctx.visuals_style = settings['visuals_style']
+                if settings.get('visuals_density'):
+                    ctx.visuals_density = settings['visuals_density']
+                for key in ('show_indicators', 'show_ichimoku', 'show_rsi', 'show_macd',
+                            'show_levels', 'show_divergence_marks', 'show_volume'):
+                    if settings.get(key) is not None:
+                        setattr(ctx, key, bool(settings[key]))
         except Exception:
             pass
 
