@@ -174,7 +174,17 @@ def can_enter_enhanced(pair: str, side: str, signal_snapshot: dict = None, ctx=N
         _log_blocked(pair, side, reason, signal_snapshot, uid)
         return False, reason
 
-    # 10. Dry run mode (allow but flag)
+    # 10. Event risk gate (fundamental filter)
+    try:
+        from fundamentals import should_block_for_event_risk
+        blocked, event_reason = should_block_for_event_risk()
+        if blocked:
+            _log_blocked(pair, side, event_reason, signal_snapshot, uid)
+            return False, event_reason
+    except Exception:
+        pass  # Degrade gracefully if fundamentals module fails
+
+    # 11. Dry run mode (allow but flag)
     if SETTINGS.DRY_RUN_MODE:
         return True, 'DRY RUN - would trade'
 
@@ -253,7 +263,14 @@ def confidence_scaled_position_size(price: float, atr_value: float,
     quality_bonus = min(1.2, 1.0 + setup_quality * 0.2)
     if dd_scale is None:
         dd_scale = drawdown_position_scale(ctx)
-    scaled_qty = base_qty * conf_factor * quality_bonus * dd_scale
+    # Apply event risk factor
+    try:
+        from fundamentals import get_news_event_risk
+        event_risk = get_news_event_risk()
+        event_factor = event_risk.get('size_factor', 1.0)
+    except Exception:
+        event_factor = 1.0
+    scaled_qty = base_qty * conf_factor * quality_bonus * dd_scale * event_factor
     cptp = ctx.capital_per_trade_pct if ctx else SETTINGS.CAPITAL_PER_TRADE_PCT
     capital = ctx.capital_usd if ctx else SETTINGS.CAPITAL_USD
     max_by_capital = (cptp * capital) / price

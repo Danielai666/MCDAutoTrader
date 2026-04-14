@@ -237,11 +237,12 @@ def render_signal_card(df: pd.DataFrame, pair: str, timeframe: str,
 # 2) Market Overview Card
 # -------------------------------------------------------------------
 def render_market_overview_card(pair_scores: list, snapshot: dict = None,
-                                 merged: dict = None) -> bytes:
+                                 merged: dict = None, event_risk: dict = None) -> bytes:
     """
-    Render market overview card with main gauge + mini gauges + table.
+    Render market overview card with main gauge + mini gauges + event risk + table.
     pair_scores: list of dicts [{pair, score, bias, timeframe}, ...]
     snapshot: latest signal snapshot for gauge computation
+    event_risk: from fundamentals.get_news_event_risk()
     Returns PNG bytes.
     """
     cache_key = 'market_overview'
@@ -253,7 +254,7 @@ def render_market_overview_card(pair_scores: list, snapshot: dict = None,
     scores = compute_composite_score(snapshot, merged)
 
     fig = plt.figure(figsize=(10.67, 6), facecolor=_DARK_BG)
-    gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.3,
+    gs = fig.add_gridspec(2, 5, hspace=0.35, wspace=0.25,
                           left=0.04, right=0.96, top=0.88, bottom=0.08)
 
     # Title
@@ -274,11 +275,19 @@ def render_market_overview_card(pair_scores: list, snapshot: dict = None,
     draw_gauge(ax_conf, scores['momentum_score'], 'Momentum', size=0.8)
 
     ax_risk = fig.add_subplot(gs[0, 3])
-    # Risk gauge: invert (high volatility = high risk)
     risk_display = 100 - scores['volatility_score']
     draw_gauge(ax_risk, risk_display, 'Risk', size=0.8)
 
-    # --- Reasons (bottom-left) ---
+    # Event risk gauge
+    ax_event = fig.add_subplot(gs[0, 4])
+    er = event_risk or {}
+    event_score = er.get('score', 50)
+    draw_gauge(ax_event, event_score, 'Event Risk', size=0.8)
+    if er.get('no_trade'):
+        ax_event.text(0, -0.45, 'NO TRADE', ha='center', fontsize=8,
+                      fontweight='bold', color=_ACCENT_RED)
+
+    # --- Reasons (bottom-left, spans 2 cols) ---
     ax_reasons = fig.add_subplot(gs[1, 0:2])
     ax_reasons.set_facecolor(_PANEL_BG)
     ax_reasons.axis('off')
@@ -301,8 +310,17 @@ def render_market_overview_card(pair_scores: list, snapshot: dict = None,
         f"Vol:{scores['volatility_score']:.0f}"
     ), fontsize=7, color=_TEXT_COLOR, alpha=0.5, transform=ax_reasons.transAxes)
 
+    # Add event risk reasons
+    if er.get('reasons'):
+        for i, r in enumerate(er['reasons'][:2]):
+            y = 0.85 - (len(reasons_text[:5]) + i) * 0.17
+            if y > 0.05:
+                ax_reasons.text(0.05, y, f'  [Event] {r}', fontsize=8,
+                                color=_ACCENT_YELLOW, transform=ax_reasons.transAxes,
+                                va='top', alpha=0.8)
+
     # --- Top symbols table (bottom-right) ---
-    ax_table = fig.add_subplot(gs[1, 2:4])
+    ax_table = fig.add_subplot(gs[1, 2:5])
     ax_table.set_facecolor(_PANEL_BG)
     ax_table.axis('off')
 

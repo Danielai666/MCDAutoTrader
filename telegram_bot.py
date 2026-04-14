@@ -570,8 +570,15 @@ async def _do_status(app, chat_id, uid):
         except Exception:
             pass
 
+        # Get event risk for gauge
+        try:
+            from fundamentals import get_news_event_risk
+            event_risk = get_news_event_risk()
+        except Exception:
+            event_risk = None
+
         from visuals.cards import render_market_overview_card
-        png = render_market_overview_card(pair_scores, snapshot, merged)
+        png = render_market_overview_card(pair_scores, snapshot, merged, event_risk=event_risk)
 
         import io
         await app.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(png),
