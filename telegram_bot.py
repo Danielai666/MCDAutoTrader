@@ -374,14 +374,57 @@ async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
 # ---------------------------
 # Commands (also used by callbacks)
 # ---------------------------
-async def _do_signal(app, chat_id, message_id=None):
-    from scheduler import run_cycle_once
+async def _do_signal(app, chat_id, message_id=None, uid=None):
+    from scheduler import run_cycle_once, _compute_signals
     if message_id:
         try:
-            await app.bot.edit_message_text("⏳ Running analysis...", chat_id=chat_id, message_id=message_id)
+            await app.bot.edit_message_text("Running analysis...", chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-    res = await run_cycle_once(app, notify=False)
+    res = await run_cycle_once(app, notify=False, user_id=uid)
+
+    # Try to render signal card
+    try:
+        pair = SETTINGS.PAIR
+        features = await _compute_signals(pair)
+        merged = features.get('merged', {})
+        snap = features.get('by_tf', {}).get('1h', {}).get('snapshot', {})
+        from exchange import fetch_ohlcv
+        df = fetch_ohlcv(pair, '1h', 120)
+
+        from risk import atr_stop_loss, atr_take_profit
+        atr_val = snap.get('atr', 0)
+        price = float(df['close'].iloc[-1]) if len(df) > 0 else 0
+        side = merged.get('merged_direction', 'HOLD')
+
+        if side in ('BUY', 'SELL') and atr_val > 0:
+            sl = atr_stop_loss(price, atr_val, side)
+            tp1 = atr_take_profit(price, atr_val, side)
+            from ai_decider import decide_async
+            dec = await decide_async(features)
+            conf = dec.get('confidence', 0)
+
+            from visuals.cards import render_signal_card
+            png = render_signal_card(
+                df, pair, '1h', entry=price, sl=sl, tp1=tp1,
+                side=side, risk_pct=SETTINGS.RISK_PER_TRADE,
+                confidence=conf, mode='Paper' if SETTINGS.PAPER_TRADING else 'Live',
+                snapshot=snap, exchange=SETTINGS.EXCHANGE,
+            )
+            summary = (
+                f"{pair} {side} @ {price:.2f}\n"
+                f"SL: {sl:.2f} | TP: {tp1:.2f}\n"
+                f"Confidence: {conf:.0%} | Score: {merged.get('merged_score', 0):.2f}\n"
+                f"Decision: {dec.get('decision', 'HOLD')}"
+            )
+            import io
+            await app.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(png),
+                                     caption=summary, reply_markup=back_keyboard())
+            return
+    except Exception as e:
+        log.warning("Signal card render failed, falling back to text: %s", e)
+
+    # Fallback to text
     if message_id:
         try:
             await app.bot.edit_message_text(res, chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard())
@@ -411,41 +454,48 @@ async def _do_status(app, chat_id, uid):
     tier, auto, mode_val, dll, mot = row
     from risk import (portfolio_exposure_check, open_trade_count, trade_count_today,
                       realized_pnl_today, get_equity_status)
-    from pair_manager import get_active_pairs
-    _, current_exp, remaining = portfolio_exposure_check()
-    max_exp = SETTINGS.CAPITAL_USD * SETTINGS.MAX_PORTFOLIO_EXPOSURE
-    exp_pct = (current_exp / max_exp * 100) if max_exp > 0 else 0
-    pnl_today = realized_pnl_today()
+    from pair_manager import get_active_pairs, get_pair_ranking
 
-    # Equity & drawdown
     eq = get_equity_status()
-    dd_bar = _drawdown_bar(eq['drawdown_pct'])
+    pnl_today = realized_pnl_today(uid)
 
-    lines = [
-        "Bot Status",
-        "",
-        f"Auto-Trade: {'AUTONOMOUS' if auto else 'OFF'}",
-        f"Mode: {'LIVE' if mode_val == 'LIVE' else 'PAPER'}",
-        f"Kill Switch: {'ON' if SETTINGS.KILL_SWITCH else 'OFF'}",
-        "",
-        f"Equity: ${eq['equity']:,.2f} (peak: ${eq['peak_equity']:,.2f})",
-        f"Drawdown: {eq['drawdown_pct']:.1%} (${eq['drawdown_usd']:,.2f}) {dd_bar}",
-        f"Max Drawdown: {eq['max_drawdown_pct']:.1%}",
-        f"Realized PnL: ${eq['realized_pnl']:,.2f} | Unrealized: ${eq['unrealized_pnl']:,.2f}",
-        "",
-        f"Exposure: ${current_exp:,.0f} / ${max_exp:,.0f} ({exp_pct:.0f}%)",
-        f"Open Trades: {open_trade_count()}/{mot}",
-        "",
-        f"Today: {trade_count_today()} trades | PnL: ${pnl_today:,.2f}",
-        f"Daily Loss Limit: ${dll}",
-        "",
-        f"Pairs: {len(get_active_pairs())} active",
-        f"Cycle: every {SETTINGS.ANALYSIS_INTERVAL_SECONDS}s",
-        f"AI Policy: {SETTINGS.AI_FUSION_POLICY}",
-        f"Trailing: {'ATR' if SETTINGS.TRAILING_ENABLED else 'OFF'}",
-        f"Correlation Guard: {'ON' if SETTINGS.CORRELATION_CHECK_ENABLED else 'OFF'}",
-    ]
-    await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
+    # Short text summary (3-6 lines)
+    summary = (
+        f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%}\n"
+        f"Open: {open_trade_count(uid)}/{mot} | Today PnL: ${pnl_today:+,.2f}\n"
+        f"Mode: {'LIVE' if mode_val == 'LIVE' else 'PAPER'} | "
+        f"Auto: {'ON' if auto else 'OFF'}\n"
+        f"Pairs: {len(get_active_pairs(uid))} active"
+    )
+
+    # Try to render Market Overview Card
+    try:
+        pair_scores = get_pair_ranking(uid)
+
+        # Get snapshot from primary pair for gauge computation
+        snapshot = {}
+        merged = {}
+        try:
+            from scheduler import _compute_signals
+            features = await _compute_signals(SETTINGS.PAIR)
+            snap_1h = features.get('by_tf', {}).get('1h', {}).get('snapshot', {})
+            snapshot = snap_1h
+            merged = features.get('merged', {})
+        except Exception:
+            pass
+
+        from visuals.cards import render_market_overview_card
+        png = render_market_overview_card(pair_scores, snapshot, merged)
+
+        import io
+        await app.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(png),
+                                 caption=summary, reply_markup=back_keyboard())
+        return
+    except Exception as e:
+        log.warning("Market overview card render failed: %s", e)
+
+    # Fallback to text-only
+    await app.bot.send_message(chat_id=chat_id, text=summary, reply_markup=back_keyboard())
 
 async def _do_settings(app, chat_id):
     tfs = ", ".join(SETTINGS.TIMEFRAMES) if isinstance(SETTINGS.TIMEFRAMES, (list, tuple)) else str(SETTINGS.TIMEFRAMES)
@@ -502,7 +552,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Signal ---
     elif data == "cmd_signal":
-        await _do_signal(app, chat_id, msg_id)
+        await _do_signal(app, chat_id, msg_id, uid=uid)
 
     # --- Price ---
     elif data == "cmd_price":
@@ -649,9 +699,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_report":
-        from reports import format_pnl_report, daily_report
-        txt = format_pnl_report(user_id=uid, days=30) + "\n\n" + daily_report(user_id=uid)
-        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
+        from reports import format_pnl_report, daily_report, performance_summary
+        from risk import get_equity_status
+
+        perf = performance_summary(user_id=uid, days=30)
+        eq = get_equity_status()
+        total_pnl = perf.get('total_pnl', 0)
+        pnl_sign = '+' if total_pnl >= 0 else ''
+
+        summary = (
+            f"PnL: {pnl_sign}${total_pnl:.2f} | Win Rate: {perf.get('win_rate', 0):.0f}%\n"
+            f"Trades: {perf.get('total_trades', 0)} (W:{perf.get('winning', 0)} L:{perf.get('losing', 0)})\n"
+            f"Equity: ${eq.get('equity', 0):,.2f} | Max DD: {eq.get('max_drawdown_pct', 0):.1%}\n"
+            f"Expectancy: ${perf.get('expectancy', 0):+.2f}"
+        )
+
+        # Try to render Daily Report Card
+        try:
+            from visuals.cards import render_daily_report_card
+            png = render_daily_report_card(perf=perf, equity_status=eq)
+            import io
+            await app.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(png),
+                                     caption=summary, reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("Report card render failed: %s", e)
+            txt = format_pnl_report(user_id=uid, days=30) + "\n\n" + daily_report(user_id=uid)
+            await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     # --- Pairs submenu ---
     elif data == "menu_pairs":
