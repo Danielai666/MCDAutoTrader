@@ -27,3 +27,12 @@ def adx(high,low,close,period=14):
 def bollinger(close,period=20,std=2.0):
     mid=close.rolling(period).mean(); s=close.rolling(period).std()
     return mid+s*std, mid, mid-s*std
+
+def ichimoku(high, low, close, tenkan_p=9, kijun_p=26, senkou_b_p=52, displacement=26):
+    """Ichimoku Cloud: tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span."""
+    tenkan = (high.rolling(tenkan_p).max() + low.rolling(tenkan_p).min()) / 2
+    kijun = (high.rolling(kijun_p).max() + low.rolling(kijun_p).min()) / 2
+    senkou_a = ((tenkan + kijun) / 2).shift(displacement)
+    senkou_b = ((high.rolling(senkou_b_p).max() + low.rolling(senkou_b_p).min()) / 2).shift(displacement)
+    chikou = close.shift(-displacement)
+    return tenkan, kijun, senkou_a, senkou_b, chikou

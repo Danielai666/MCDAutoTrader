@@ -39,6 +39,7 @@ class Settings:
     FEATURE_CANDLE_PATTERNS: bool = _bool('FEATURE_CANDLE_PATTERNS')
     FEATURE_HIDDEN_DIVERGENCE: bool = _bool('FEATURE_HIDDEN_DIVERGENCE')
     FEATURE_MARKET_REGIME: bool = _bool('FEATURE_MARKET_REGIME')
+    FEATURE_ICHIMOKU: bool = _bool('FEATURE_ICHIMOKU', 'true')
 
     # --- Market / Exchange ---
     EXCHANGE: str = os.getenv('EXCHANGE', 'kraken')

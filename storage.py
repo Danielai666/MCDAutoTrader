@@ -109,6 +109,42 @@ CREATE TABLE IF NOT EXISTS performance_snapshots(
     total_trades INTEGER, winning_trades INTEGER, losing_trades INTEGER,
     total_pnl REAL, avg_win REAL, avg_loss REAL, win_rate REAL, expectancy REAL
 );
+CREATE TABLE IF NOT EXISTS credentials(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    provider_type TEXT NOT NULL DEFAULT 'ccxt',
+    exchange_id TEXT NOT NULL DEFAULT 'kraken',
+    api_key_enc TEXT NOT NULL,
+    api_secret_enc TEXT NOT NULL,
+    data_key_enc TEXT,
+    encryption_version INTEGER DEFAULT 1,
+    meta_json TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_ts INTEGER,
+    updated_ts INTEGER,
+    UNIQUE(user_id, provider_type, exchange_id)
+);
+CREATE TABLE IF NOT EXISTS user_settings(
+    user_id INTEGER PRIMARY KEY,
+    mode TEXT DEFAULT 'signal_only',
+    ai_mode TEXT DEFAULT 'signal_only',
+    default_provider TEXT DEFAULT 'ccxt',
+    default_exchange TEXT DEFAULT 'kraken',
+    allowed_symbols_json TEXT,
+    timeframe_policy TEXT DEFAULT '30m,1h,4h,1d',
+    timezone TEXT DEFAULT 'UTC',
+    panic_stop INTEGER DEFAULT 0,
+    updated_ts INTEGER
+);
+CREATE TABLE IF NOT EXISTS operation_log(
+    operation_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    op_type TEXT,
+    pair TEXT,
+    side TEXT,
+    result_json TEXT,
+    created_ts INTEGER
+);
 '''
 
 # -------------------------------------------------------------------
@@ -177,6 +213,45 @@ CREATE TABLE IF NOT EXISTS performance_snapshots(
     total_pnl DOUBLE PRECISION, avg_win DOUBLE PRECISION,
     avg_loss DOUBLE PRECISION, win_rate DOUBLE PRECISION,
     expectancy DOUBLE PRECISION
+);
+
+CREATE TABLE IF NOT EXISTS credentials(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    provider_type TEXT NOT NULL DEFAULT 'ccxt',
+    exchange_id TEXT NOT NULL DEFAULT 'kraken',
+    api_key_enc TEXT NOT NULL,
+    api_secret_enc TEXT NOT NULL,
+    data_key_enc TEXT,
+    encryption_version INTEGER DEFAULT 1,
+    meta_json TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_ts BIGINT,
+    updated_ts BIGINT,
+    UNIQUE(user_id, provider_type, exchange_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_settings(
+    user_id BIGINT PRIMARY KEY,
+    mode TEXT DEFAULT 'signal_only',
+    ai_mode TEXT DEFAULT 'signal_only',
+    default_provider TEXT DEFAULT 'ccxt',
+    default_exchange TEXT DEFAULT 'kraken',
+    allowed_symbols_json TEXT,
+    timeframe_policy TEXT DEFAULT '30m,1h,4h,1d',
+    timezone TEXT DEFAULT 'UTC',
+    panic_stop INTEGER DEFAULT 0,
+    updated_ts BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS operation_log(
+    operation_id TEXT PRIMARY KEY,
+    user_id BIGINT,
+    op_type TEXT,
+    pair TEXT,
+    side TEXT,
+    result_json TEXT,
+    created_ts BIGINT
 );
 '''
 
@@ -570,3 +645,148 @@ def check_db_health() -> tuple:
         return True, f"DB OK ({details['engine']})", details
     except Exception as e:
         return False, f"DB error: {e}", details
+
+
+# -------------------------------------------------------------------
+# Credentials table helpers
+# -------------------------------------------------------------------
+def save_credential(user_id: int, provider_type: str, exchange_id: str,
+                    api_key_enc: str, api_secret_enc: str,
+                    data_key_enc: str = None, encryption_version: int = 2,
+                    meta_json: str = None):
+    """Save or update encrypted credentials for a user+provider+exchange combo."""
+    import time as _t
+    now = int(_t.time())
+    if _USE_POSTGRES:
+        execute(
+            "INSERT INTO credentials(user_id, provider_type, exchange_id, api_key_enc, api_secret_enc, "
+            "data_key_enc, encryption_version, meta_json, is_active, created_ts, updated_ts) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s) "
+            "ON CONFLICT(user_id, provider_type, exchange_id) DO UPDATE SET "
+            "api_key_enc=EXCLUDED.api_key_enc, api_secret_enc=EXCLUDED.api_secret_enc, "
+            "data_key_enc=EXCLUDED.data_key_enc, encryption_version=EXCLUDED.encryption_version, "
+            "meta_json=EXCLUDED.meta_json, updated_ts=EXCLUDED.updated_ts, is_active=1",
+            (user_id, provider_type, exchange_id, api_key_enc, api_secret_enc,
+             data_key_enc, encryption_version, meta_json, now, now)
+        )
+    else:
+        existing = fetchone(
+            "SELECT id FROM credentials WHERE user_id=? AND provider_type=? AND exchange_id=?",
+            (user_id, provider_type, exchange_id))
+        if existing:
+            execute(
+                "UPDATE credentials SET api_key_enc=?, api_secret_enc=?, data_key_enc=?, "
+                "encryption_version=?, meta_json=?, updated_ts=?, is_active=1 "
+                "WHERE user_id=? AND provider_type=? AND exchange_id=?",
+                (api_key_enc, api_secret_enc, data_key_enc, encryption_version,
+                 meta_json, now, user_id, provider_type, exchange_id))
+        else:
+            execute(
+                "INSERT INTO credentials(user_id, provider_type, exchange_id, api_key_enc, api_secret_enc, "
+                "data_key_enc, encryption_version, meta_json, is_active, created_ts, updated_ts) "
+                "VALUES(?,?,?,?,?,?,?,?,1,?,?)",
+                (user_id, provider_type, exchange_id, api_key_enc, api_secret_enc,
+                 data_key_enc, encryption_version, meta_json, now, now))
+
+
+def get_credential(user_id: int, provider_type: str = 'ccxt', exchange_id: str = None) -> dict:
+    """Get active credential for a user. Returns dict or None."""
+    if exchange_id:
+        row = fetchone(
+            "SELECT exchange_id, api_key_enc, api_secret_enc, data_key_enc, encryption_version, meta_json "
+            "FROM credentials WHERE user_id=? AND provider_type=? AND exchange_id=? AND is_active=1",
+            (user_id, provider_type, exchange_id))
+    else:
+        row = fetchone(
+            "SELECT exchange_id, api_key_enc, api_secret_enc, data_key_enc, encryption_version, meta_json "
+            "FROM credentials WHERE user_id=? AND provider_type=? AND is_active=1 "
+            "ORDER BY updated_ts DESC",
+            (user_id, provider_type))
+    if not row:
+        return None
+    return {
+        'exchange_id': row[0], 'api_key_enc': row[1], 'api_secret_enc': row[2],
+        'data_key_enc': row[3], 'encryption_version': row[4], 'meta_json': row[5],
+    }
+
+
+def delete_credential(user_id: int, provider_type: str, exchange_id: str):
+    """Soft-delete a credential (set is_active=0)."""
+    execute(
+        "UPDATE credentials SET is_active=0 WHERE user_id=? AND provider_type=? AND exchange_id=?",
+        (user_id, provider_type, exchange_id))
+
+
+# -------------------------------------------------------------------
+# User settings helpers
+# -------------------------------------------------------------------
+def get_user_settings(user_id: int) -> dict:
+    """Get user settings. Returns dict or None."""
+    row = fetchone(
+        "SELECT mode, ai_mode, default_provider, default_exchange, allowed_symbols_json, "
+        "timeframe_policy, timezone, panic_stop "
+        "FROM user_settings WHERE user_id=?", (user_id,))
+    if not row:
+        return None
+    return {
+        'mode': row[0], 'ai_mode': row[1], 'default_provider': row[2],
+        'default_exchange': row[3], 'allowed_symbols_json': row[4],
+        'timeframe_policy': row[5], 'timezone': row[6], 'panic_stop': row[7],
+    }
+
+
+def upsert_user_settings(user_id: int, **kwargs):
+    """Update user settings. Only updates provided fields."""
+    import time as _t
+    now = int(_t.time())
+    existing = get_user_settings(user_id)
+    if existing:
+        sets = []
+        vals = []
+        for k, v in kwargs.items():
+            if k in ('mode', 'ai_mode', 'default_provider', 'default_exchange',
+                     'allowed_symbols_json', 'timeframe_policy', 'timezone', 'panic_stop'):
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if sets:
+            sets.append("updated_ts=?")
+            vals.append(now)
+            vals.append(user_id)
+            execute(f"UPDATE user_settings SET {', '.join(sets)} WHERE user_id=?", tuple(vals))
+    else:
+        cols = ['user_id', 'updated_ts']
+        vals = [user_id, now]
+        for k, v in kwargs.items():
+            if k in ('mode', 'ai_mode', 'default_provider', 'default_exchange',
+                     'allowed_symbols_json', 'timeframe_policy', 'timezone', 'panic_stop'):
+                cols.append(k)
+                vals.append(v)
+        placeholders = ','.join(['?'] * len(cols))
+        execute(f"INSERT INTO user_settings({','.join(cols)}) VALUES({placeholders})", tuple(vals))
+
+
+# -------------------------------------------------------------------
+# Operation log helpers (idempotency)
+# -------------------------------------------------------------------
+def check_operation_id(operation_id: str) -> dict:
+    """Check if an operation already executed. Returns dict or None."""
+    row = fetchone(
+        "SELECT operation_id, user_id, op_type, pair, side, result_json "
+        "FROM operation_log WHERE operation_id=?", (operation_id,))
+    if not row:
+        return None
+    return {
+        'operation_id': row[0], 'user_id': row[1], 'op_type': row[2],
+        'pair': row[3], 'side': row[4], 'result_json': row[5],
+    }
+
+
+def record_operation(operation_id: str, user_id: int, op_type: str,
+                     pair: str, side: str, result_json: str):
+    """Record a completed operation for idempotency."""
+    import time as _t
+    execute(
+        "INSERT INTO operation_log(operation_id, user_id, op_type, pair, side, result_json, created_ts) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (operation_id, user_id, op_type, pair, side, result_json, int(_t.time()))
+    )

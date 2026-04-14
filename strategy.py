@@ -159,6 +159,40 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
             reasons.append(f'DivRadar bear [{z.stage}] p={z.probability:.0%}')
             components.append({'name': 'div_radar', 'direction': 'bearish', 'weight': round(w, 3), 'stage': z.stage})
 
+    # 10. Ichimoku confirmation (weight 1.0) — feature flag
+    ichimoku_result = None
+    if SETTINGS.FEATURE_ICHIMOKU:
+        try:
+            from indicators import ichimoku
+            tenkan, kijun, senkou_a, senkou_b, chikou = ichimoku(high, low, close)
+            cur_close = float(close.iloc[-1])
+            cur_tenkan = float(tenkan.iloc[-1]) if not pd.isna(tenkan.iloc[-1]) else 0
+            cur_kijun = float(kijun.iloc[-1]) if not pd.isna(kijun.iloc[-1]) else 0
+            cur_senkou_a = float(senkou_a.iloc[-1]) if not pd.isna(senkou_a.iloc[-1]) else 0
+            cur_senkou_b = float(senkou_b.iloc[-1]) if not pd.isna(senkou_b.iloc[-1]) else 0
+
+            cloud_top = max(cur_senkou_a, cur_senkou_b)
+            cloud_bottom = min(cur_senkou_a, cur_senkou_b)
+            tk_bull = cur_tenkan > cur_kijun
+            above_cloud = cur_close > cloud_top
+            below_cloud = cur_close < cloud_bottom
+
+            ichimoku_result = {
+                'tenkan': round(cur_tenkan, 4), 'kijun': round(cur_kijun, 4),
+                'senkou_a': round(cur_senkou_a, 4), 'senkou_b': round(cur_senkou_b, 4),
+                'above_cloud': above_cloud, 'below_cloud': below_cloud,
+                'tk_bullish': tk_bull,
+            }
+
+            if tk_bull and above_cloud:
+                buy_score += 1.0; reasons.append('Ichimoku bullish (TK cross + above cloud)')
+                components.append({'name': 'ichimoku', 'direction': 'bullish', 'weight': 1.0})
+            elif not tk_bull and below_cloud:
+                sell_score += 1.0; reasons.append('Ichimoku bearish (TK cross + below cloud)')
+                components.append({'name': 'ichimoku', 'direction': 'bearish', 'weight': 1.0})
+        except Exception:
+            pass
+
     # --- direction decision (threshold 1.5) ---
     direction = 'HOLD'
     score = buy_score - sell_score
@@ -168,7 +202,8 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
     return _build_result(
         direction, score, ', '.join(reasons),
         close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
-        candle_summary, regime_result, components, radar_zones=radar_zones
+        candle_summary, regime_result, components, radar_zones=radar_zones,
+        ichimoku_result=ichimoku_result
     )
 
 
@@ -179,7 +214,8 @@ def _bb_pos(price, upper, lower):
 
 
 def _build_result(direction, score, reasons, close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
-                  candle_summary=None, regime_result=None, components=None, radar_zones=None):
+                  candle_summary=None, regime_result=None, components=None, radar_zones=None,
+                  ichimoku_result=None):
     snapshot = {
         'macd': float(mline.iloc[-1]), 'rsi': float(r.iloc[-1]),
         'stoch_k': float(k.iloc[-1]), 'stoch_d': float(d.iloc[-1]),
@@ -193,6 +229,8 @@ def _build_result(direction, score, reasons, close, mline, r, k, d, e9, e21, a, 
         snapshot['regime'] = regime_result.to_dict()
     if radar_zones:
         snapshot['div_radar'] = [z.to_dict() for z in radar_zones[:5]]
+    if ichimoku_result:
+        snapshot['ichimoku'] = ichimoku_result
 
     result = {
         'direction': direction, 'score': score,
