@@ -48,6 +48,17 @@ def _check_rate_limit(uid: int, limit: int = 10, window: int = 60) -> bool:
     times.append(now)
     return True
 
+def rate_limited(func):
+    """Decorator: applies per-user rate limiting to command handlers."""
+    async def wrapper(update: Update, context):
+        uid = update.effective_user.id
+        if not _check_rate_limit(uid):
+            await update.message.reply_text("Rate limit exceeded. Try again shortly.")
+            return
+        return await func(update, context)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
 # ---------------------------
 # Connect exchange state machine
 # ---------------------------
@@ -406,16 +417,17 @@ async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
         except Exception:
             is_paper = SETTINGS.PAPER_TRADING
 
+        closed_ids = []
         if is_paper:
             closed, total_pnl = _paper_close_all(pair, price, user_id=admin_id)
         else:
-            # close_all_for_pair with user filter
             user_trades = fetchall("SELECT id FROM trades WHERE status='OPEN' AND pair=? AND user_id=?", (pair, admin_id))
             for (tid,) in (user_trades or []):
                 from trade_executor import close_trade
                 pnl = close_trade(tid, price, f"auto_exit: {reason}")
                 total_pnl = (total_pnl or 0) + pnl
                 closed += 1
+                closed_ids.append(tid)
     except Exception as e:
         log.exception("auto-exit: closing failed for user %s pair %s: %s", admin_id, pair, e)
 
@@ -431,6 +443,17 @@ async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
         if total_pnl is not None:
             lines.append(f"PnL (paper): {total_pnl:.2f}")
         await application.bot.send_message(chat_id=admin_id, text="\n".join(lines))
+
+        # Send per-trade close reports
+        if closed_ids:
+            from reports import format_trade_close_report
+            for tid in closed_ids:
+                try:
+                    report = format_trade_close_report(tid)
+                    if report:
+                        await application.bot.send_message(chat_id=admin_id, text=report)
+                except Exception:
+                    pass
     except Exception as e:
         log.warning("auto-exit: notify failed for %s: %s", pair, e)
 
@@ -1601,24 +1624,24 @@ def build_app() -> Application:
     b.post_init(post_init)
     app = b.build()
 
-    # --- Original command handlers ---
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("autotrade", autotrade))
-    app.add_handler(CommandHandler("mode", mode))
-    app.add_handler(CommandHandler("risk", risk))
-    app.add_handler(CommandHandler("sellnow", sellnow))
-    app.add_handler(CommandHandler("sl", set_sl))
-    app.add_handler(CommandHandler("tp", set_tp))
-    app.add_handler(CommandHandler("trail", set_trail))
-    app.add_handler(CommandHandler("cancel", cancel_guard))
-    app.add_handler(CommandHandler("signal", signal))
-    app.add_handler(CommandHandler("guards", guards))
-    app.add_handler(CommandHandler("checkguards", checkguards))
-    app.add_handler(CommandHandler("price", price))
+    # --- Original command handlers (all rate-limited) ---
+    app.add_handler(CommandHandler("start", rate_limited(start)))
+    app.add_handler(CommandHandler("menu", rate_limited(menu_cmd)))
+    app.add_handler(CommandHandler("help", rate_limited(help_cmd)))
+    app.add_handler(CommandHandler("status", rate_limited(status)))
+    app.add_handler(CommandHandler("settings", rate_limited(settings)))
+    app.add_handler(CommandHandler("autotrade", rate_limited(autotrade)))
+    app.add_handler(CommandHandler("mode", rate_limited(mode)))
+    app.add_handler(CommandHandler("risk", rate_limited(risk)))
+    app.add_handler(CommandHandler("sellnow", rate_limited(sellnow)))
+    app.add_handler(CommandHandler("sl", rate_limited(set_sl)))
+    app.add_handler(CommandHandler("tp", rate_limited(set_tp)))
+    app.add_handler(CommandHandler("trail", rate_limited(set_trail)))
+    app.add_handler(CommandHandler("cancel", rate_limited(cancel_guard)))
+    app.add_handler(CommandHandler("signal", rate_limited(signal)))
+    app.add_handler(CommandHandler("guards", rate_limited(guards)))
+    app.add_handler(CommandHandler("checkguards", rate_limited(checkguards)))
+    app.add_handler(CommandHandler("price", rate_limited(price)))
 
     # --- New Phase 5-7 commands ---
     app.add_handler(CommandHandler("positions", positions_cmd))

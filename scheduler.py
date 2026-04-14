@@ -395,14 +395,57 @@ async def _health_check_job(app: Application):
 
 
 async def _daily_report_job(app: Application):
-    """Send per-user daily reports."""
+    """Send per-user daily reports at each user's local 20:00."""
     try:
-        from reports import daily_report
+        from reports import daily_report, performance_summary
+        from risk import get_equity_status
+        from storage import get_user_settings
+        from datetime import datetime
+
+        try:
+            import pytz
+        except ImportError:
+            pytz = None
+
         users = fetchall("SELECT user_id FROM users")
+        now_utc = datetime.utcnow()
+
         for (uid,) in (users or []):
             try:
-                report = daily_report(user_id=uid)
-                await app.bot.send_message(chat_id=uid, text=f"Daily Report\n{report}")
+                # Check user timezone — only send if it's their report hour (20:00 local)
+                tz_name = 'UTC'
+                settings = get_user_settings(uid)
+                if settings and settings.get('timezone'):
+                    tz_name = settings['timezone']
+
+                if pytz:
+                    user_tz = pytz.timezone(tz_name)
+                    user_now = datetime.now(pytz.utc).astimezone(user_tz)
+                    if user_now.hour != 20:
+                        continue
+                # If pytz not available, send to everyone (fallback)
+
+                # Try to send visual report card
+                try:
+                    perf = performance_summary(user_id=uid, days=30)
+                    eq = get_equity_status()
+                    total_pnl = perf.get('total_pnl', 0)
+                    sign = '+' if total_pnl >= 0 else ''
+
+                    summary = (
+                        f"PnL: {sign}${total_pnl:.2f} | Win: {perf.get('win_rate', 0):.0f}%\n"
+                        f"Trades: {perf.get('total_trades', 0)} | Equity: ${eq.get('equity', 0):,.2f}\n"
+                        f"Max DD: {eq.get('max_drawdown_pct', 0):.1%}"
+                    )
+
+                    from visuals.cards import render_daily_report_card
+                    png = render_daily_report_card(perf=perf, equity_status=eq)
+                    import io
+                    await app.bot.send_photo(chat_id=uid, photo=io.BytesIO(png), caption=f"Daily Report\n{summary}")
+                except Exception:
+                    # Fallback to text
+                    report = daily_report(user_id=uid)
+                    await app.bot.send_message(chat_id=uid, text=f"Daily Report\n{report}")
             except Exception:
                 pass
     except Exception as e:
@@ -456,6 +499,6 @@ def schedule_jobs(app: Application):
     async def daily_job(ctx):
         await _daily_report_job(app)
 
-    jq.run_repeating(daily_job, interval=86400, first=3600, name="daily_report")
+    jq.run_repeating(daily_job, interval=3600, first=3600, name="daily_report")  # hourly check, sends at user's local 20:00
     log.info("Scheduler jobs registered: analysis=%ds, health=%ds, daily=86400s",
              SETTINGS.ANALYSIS_INTERVAL_SECONDS, SETTINGS.HEALTH_CHECK_INTERVAL_SECONDS)
