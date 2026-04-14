@@ -175,9 +175,12 @@ def _save_trailing(uid: int, pair: str, trail_stop: Optional[float], high_wm: Op
         (trail_stop, high_wm, uid, pair),
     )
 
-def _paper_close_all(pair: str, px: float) -> Tuple[int, float]:
+def _paper_close_all(pair: str, px: float, user_id: int = None) -> Tuple[int, float]:
     now = int(time.time())
-    rows = fetchall("SELECT id, side, qty, entry FROM trades WHERE status='OPEN' AND pair=?", (pair,))
+    if user_id is not None:
+        rows = fetchall("SELECT id, side, qty, entry FROM trades WHERE status='OPEN' AND pair=? AND user_id=?", (pair, user_id))
+    else:
+        rows = fetchall("SELECT id, side, qty, entry FROM trades WHERE status='OPEN' AND pair=?", (pair,))
     total_pnl = 0.0
     closed = 0
     for tid, side, qty, entry in rows:
@@ -191,9 +194,9 @@ def _paper_close_all(pair: str, px: float) -> Tuple[int, float]:
         closed += 1
     return closed, total_pnl
 
-def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
+def _check_atr_trailing_stops(pair: str, price: float, user_id: int = None) -> Optional[str]:
     """
-    Check ATR-based trailing stops for all open trades on this pair.
+    Check ATR-based trailing stops for open trades on this pair (optionally per-user).
     Updates trail stops in DB and returns exit reason if triggered.
     """
     from risk import compute_atr_trailing_stop, is_atr_trail_triggered
@@ -202,10 +205,14 @@ def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
     if not SETTINGS.TRAILING_ENABLED:
         return None
 
-    rows = fetchall(
-        "SELECT id, side, entry, entry_snapshot FROM trades WHERE status='OPEN' AND pair=?",
-        (pair,)
-    )
+    if user_id is not None:
+        rows = fetchall(
+            "SELECT id, side, entry, entry_snapshot FROM trades WHERE status='OPEN' AND pair=? AND user_id=?",
+            (pair, user_id))
+    else:
+        rows = fetchall(
+            "SELECT id, side, entry, entry_snapshot FROM trades WHERE status='OPEN' AND pair=?",
+            (pair,))
     for tid, side, entry, snapshot_str in rows:
         entry = float(entry)
         # Get ATR from entry snapshot
@@ -249,24 +256,20 @@ def _check_atr_trailing_stops(pair: str, price: float) -> Optional[str]:
 
 
 async def auto_exit_task(application) -> None:
-    """Check guards for ALL pairs with open trades, not just the primary pair."""
-    admin_id = _get_admin_id()
-    if not admin_id:
+    """Check guards for ALL users with open trades. Per-user isolation."""
+    # Get all users who have open trades
+    user_rows = fetchall("SELECT DISTINCT user_id FROM trades WHERE status='OPEN' AND user_id IS NOT NULL")
+    if not user_rows:
         return
 
-    # Get all distinct pairs with open trades
-    rows = fetchall("SELECT DISTINCT pair FROM trades WHERE status='OPEN'")
-    pairs_to_check = [r[0] for r in rows] if rows else []
-
-    # Also check the primary pair (may have guards without open trades)
-    if SETTINGS.PAIR not in pairs_to_check:
-        pairs_to_check.append(SETTINGS.PAIR)
-
-    for pair in pairs_to_check:
-        try:
-            await _check_pair_guards(application, admin_id, pair)
-        except Exception as e:
-            log.warning("auto-exit check failed for %s: %s", pair, e)
+    for (uid,) in user_rows:
+        # Get this user's open trade pairs
+        pair_rows = fetchall("SELECT DISTINCT pair FROM trades WHERE status='OPEN' AND user_id=?", (uid,))
+        for (pair,) in (pair_rows or []):
+            try:
+                await _check_pair_guards(application, uid, pair)
+            except Exception as e:
+                log.warning("auto-exit check failed for user %s pair %s: %s", uid, pair, e)
 
 
 async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
@@ -313,9 +316,9 @@ async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
             elif updated:
                 log.info("auto-exit: %s trail updated high=%.6f stop=%.6f", pair, high_wm, trail_stop or -1)
 
-    # --- Check ATR-based trailing stops for open trades ---
+    # --- Check ATR-based trailing stops for this user's open trades ---
     if not reason:
-        reason = _check_atr_trailing_stops(pair, price)
+        reason = _check_atr_trailing_stops(pair, price, user_id=admin_id)
 
     if not reason:
         return
@@ -328,16 +331,30 @@ async def _check_pair_guards(application, admin_id: int, pair: str) -> None:
         return
     LAST_NOTIFY[key] = now_ts
 
-    # Execute close
+    # Execute close (scoped to user)
     closed = 0
     total_pnl = None
     try:
-        if SETTINGS.PAPER_TRADING:
-            closed, total_pnl = _paper_close_all(pair, price)
+        # Use user's trade mode if available
+        from user_context import UserContext
+        try:
+            ctx = UserContext.load(admin_id)
+            is_paper = ctx.paper_trading
+        except Exception:
+            is_paper = SETTINGS.PAPER_TRADING
+
+        if is_paper:
+            closed, total_pnl = _paper_close_all(pair, price, user_id=admin_id)
         else:
-            closed = close_all_for_pair(pair, f"auto_exit: {reason}") or 0
+            # close_all_for_pair with user filter
+            user_trades = fetchall("SELECT id FROM trades WHERE status='OPEN' AND pair=? AND user_id=?", (pair, admin_id))
+            for (tid,) in (user_trades or []):
+                from trade_executor import close_trade
+                pnl = close_trade(tid, price, f"auto_exit: {reason}")
+                total_pnl = (total_pnl or 0) + pnl
+                closed += 1
     except Exception as e:
-        log.exception("auto-exit: closing failed for %s: %s", pair, e)
+        log.exception("auto-exit: closing failed for user %s pair %s: %s", admin_id, pair, e)
 
     # Notify
     try:
@@ -612,28 +629,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd_positions":
         from reports import format_position_report
-        txt = format_position_report()
+        txt = format_position_report(user_id=uid)
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_pnl":
         from reports import format_pnl_report
-        txt = format_pnl_report(days=30)
+        txt = format_pnl_report(user_id=uid, days=30)
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_trades":
         from reports import get_recent_closed, format_trades_brief
-        rows = get_recent_closed(n=10)
+        rows = get_recent_closed(n=10, user_id=uid)
         txt = format_trades_brief(rows, "Recent closed")
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_blocked":
         from reports import blocked_trades_summary
-        txt = blocked_trades_summary(days=7)
+        txt = blocked_trades_summary(user_id=uid, days=7)
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_report":
         from reports import format_pnl_report, daily_report
-        txt = format_pnl_report(days=30) + "\n\n" + daily_report()
+        txt = format_pnl_report(user_id=uid, days=30) + "\n\n" + daily_report(user_id=uid)
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     # --- Pairs submenu ---
@@ -642,7 +659,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd_pairs":
         from pair_manager import list_all_pairs
-        pairs = list_all_pairs()
+        pairs = list_all_pairs(user_id=uid)
         if not pairs:
             txt = "No pairs in watchlist."
         else:
@@ -656,7 +673,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd_ranking":
         from pair_manager import get_pair_ranking
-        ranking = get_pair_ranking()
+        ranking = get_pair_ranking(user_id=uid)
         if not ranking:
             txt = "No active pairs."
         else:
@@ -740,11 +757,11 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if ptype in ("addpair", "rmpair"):
         if ptype == "addpair":
             from pair_manager import add_pair
-            ok, msg = add_pair(txt.upper())
+            ok, msg = add_pair(uid, txt.upper())
             await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}", reply_markup=back_keyboard())
         elif ptype == "rmpair":
             from pair_manager import remove_pair
-            remove_pair(txt.upper())
+            remove_pair(txt.upper(), user_id=uid)
             await update.message.reply_text(f"✅ {txt.upper()} removed", reply_markup=back_keyboard())
         return
 
@@ -1071,6 +1088,75 @@ async def blocked_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(blocked_trades_summary(days), reply_markup=back_keyboard())
 
 
+async def setkeys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set exchange API keys. Usage: /setkeys <api_key> <api_secret>
+    Keys are encrypted at rest. The message containing keys is deleted for safety."""
+    uid = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /setkeys <api_key> <api_secret>\n"
+            "Keys will be encrypted and your message deleted.",
+            reply_markup=back_keyboard())
+        return
+
+    api_key = context.args[0]
+    api_secret = context.args[1]
+
+    # Delete the message containing plaintext keys immediately
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    try:
+        from crypto_utils import encrypt_credential, is_encryption_configured
+        if not is_encryption_configured():
+            await update.effective_chat.send_message(
+                "Encryption not configured. Set CREDENTIAL_ENCRYPTION_KEY env var.",
+                reply_markup=back_keyboard())
+            return
+
+        key_enc = encrypt_credential(api_key)
+        secret_enc = encrypt_credential(api_secret)
+        execute("UPDATE users SET exchange_key_enc=?, exchange_secret_enc=? WHERE user_id=?",
+                (key_enc, secret_enc, uid))
+        await update.effective_chat.send_message(
+            "Exchange API keys set and encrypted.\n"
+            "Your message with plaintext keys has been deleted.",
+            reply_markup=back_keyboard())
+    except Exception as e:
+        await update.effective_chat.send_message(f"Failed to set keys: {e}", reply_markup=back_keyboard())
+
+
+async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's account settings."""
+    uid = update.effective_user.id
+    from user_context import UserContext
+    from crypto_utils import mask_secret
+    ctx = UserContext.load(uid)
+    lines = [
+        "My Account",
+        f"User ID: {ctx.user_id}",
+        f"Username: @{ctx.tg_username}" if ctx.tg_username else "Username: -",
+        f"Tier: {ctx.tier}",
+        "",
+        f"Capital: ${ctx.capital_usd:,.2f}",
+        f"Risk/Trade: {ctx.risk_per_trade:.1%}",
+        f"Max Open: {ctx.max_open_trades}",
+        f"Daily Loss Limit: ${ctx.daily_loss_limit:,.2f}",
+        f"Max Exposure: {ctx.max_portfolio_exposure:.0%}",
+        "",
+        f"Mode: {ctx.trade_mode}",
+        f"Paper: {'Yes' if ctx.paper_trading else 'No'}",
+        f"AutoTrade: {'ON' if ctx.autotrade_enabled else 'OFF'}",
+        f"Exchange: {ctx.exchange_name}",
+        f"API Key: {mask_secret(ctx.exchange_key) if ctx.exchange_key else 'Not set'}",
+        "",
+        f"AI Policy: {ctx.ai_fusion_policy}",
+    ]
+    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+
+
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exchange reconciliation. Usage: /reconcile [fix]"""
     uid = update.effective_user.id
@@ -1221,6 +1307,10 @@ def build_app() -> Application:
     # --- Production hardening commands ---
     app.add_handler(CommandHandler("reconcile", reconcile_cmd))
     app.add_handler(CommandHandler("liveready", liveready_cmd))
+
+    # --- Multi-user commands ---
+    app.add_handler(CommandHandler("setkeys", setkeys_cmd))
+    app.add_handler(CommandHandler("myaccount", myaccount_cmd))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))

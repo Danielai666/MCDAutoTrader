@@ -60,9 +60,12 @@ def update_trade_lifecycle(trade_id: int, lifecycle: str):
     execute("UPDATE trades SET lifecycle=? WHERE id=?", (lifecycle, trade_id))
 
 
-def get_open_trades_for_pair(pair: str) -> list:
-    """Get all open trades for a pair as list of dicts."""
-    rows = fetchall("SELECT id, side, qty, entry, ts_open FROM trades WHERE status='OPEN' AND pair=?", (pair,))
+def get_open_trades_for_pair(pair: str, user_id: int = None) -> list:
+    """Get open trades for a pair, optionally filtered by user."""
+    if user_id is not None:
+        rows = fetchall("SELECT id, side, qty, entry, ts_open FROM trades WHERE status='OPEN' AND pair=? AND user_id=?", (pair, user_id))
+    else:
+        rows = fetchall("SELECT id, side, qty, entry, ts_open FROM trades WHERE status='OPEN' AND pair=?", (pair,))
     return [{'id': r[0], 'side': r[1], 'qty': float(r[2]), 'entry': float(r[3]), 'ts_open': r[4]} for r in rows]
 
 
@@ -93,9 +96,11 @@ def _clear_execution_lock(pair: str, side: str):
 
 def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
                               sl_price: float, tp_price: float,
-                              reason: str = "", entry_snapshot: str = None) -> dict:
+                              reason: str = "", entry_snapshot: str = None,
+                              ctx=None) -> dict:
     """
     Full trade execution: DB record + exchange order + SL/TP guards.
+    If ctx (UserContext) is provided, uses per-user settings and credentials.
     Hardened sequence:
       1. Dedup check
       2. Create DB record (status=PENDING)
@@ -117,7 +122,9 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
 
     trade_id = 0
     order_id = None
-    mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
+    is_paper = ctx.paper_trading if ctx else SETTINGS.PAPER_TRADING
+    mode = 'PAPER' if is_paper else 'LIVE'
+    uid = ctx.user_id if ctx else None
 
     try:
         # 2. Create DB record with PENDING status
@@ -125,10 +132,10 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
         if _USE_POSTGRES:
             row = fetchone(
                 "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, "
-                "entry_snapshot, trade_type) "
-                "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto') RETURNING id",
+                "entry_snapshot, trade_type, user_id) "
+                "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto', ?) RETURNING id",
                 (pair, side.upper(), float(qty), float(price), now,
-                 reason or "auto_trade", entry_snapshot))
+                 reason or "auto_trade", entry_snapshot, uid))
             trade_id = int(row[0]) if row else 0
         else:
             from storage import _sqlite_lock, _get_sqlite_conn
@@ -137,47 +144,47 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
                 cur = conn.cursor()
                 cur.execute(
                     "INSERT INTO trades(pair, side, qty, entry, status, ts_open, note, lifecycle, "
-                    "entry_snapshot, trade_type) "
-                    "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto')",
+                    "entry_snapshot, trade_type, user_id) "
+                    "VALUES(?,?,?,?, 'PENDING', ?, ?, 'pending', ?, 'auto', ?)",
                     (pair, side.upper(), float(qty), float(price), now,
-                     reason or "auto_trade", entry_snapshot))
+                     reason or "auto_trade", entry_snapshot, uid))
                 conn.commit()
                 trade_id = cur.lastrowid
 
         if trade_id == 0:
-            log.error("Failed to create trade record for %s %s", side, pair)
+            log.error("Failed to create trade record for %s %s (user %s)", side, pair, uid)
             _clear_execution_lock(pair, side)
             return {'success': False, 'trade_id': 0, 'order_id': None,
                     'mode': mode, 'error': 'DB insert failed'}
 
-        log.info("Trade %d created (PENDING): %s %s %.6f %s @ %.2f",
-                 trade_id, mode, side, qty, pair, price)
+        log.info("Trade %d created (PENDING): %s %s %.6f %s @ %.2f [user=%s]",
+                 trade_id, mode, side, qty, pair, price, uid)
 
-        # 3. Execute on exchange
+        # 3. Execute on exchange (using user's credentials if ctx provided)
         try:
             from exchange import place_market_order
-            result = place_market_order(pair, side, qty)
+            result = place_market_order(pair, side, qty, ctx=ctx)
             order_id = result.get('id', f'paper-{trade_id}')
 
             # 4. Success: update to OPEN with order_id
             execute("UPDATE trades SET status='OPEN', lifecycle='open', order_id=? WHERE id=?",
                     (str(order_id), trade_id))
-            log.info("Trade %d OPEN: order=%s", trade_id, order_id)
+            log.info("Trade %d OPEN: order=%s [user=%s]", trade_id, order_id, uid)
 
         except Exception as e:
             # 5. Failure: mark as FAILED
-            log.error("Order execution failed for trade %d (%s): %s", trade_id, pair, e)
+            log.error("Order execution failed for trade %d (%s, user %s): %s", trade_id, pair, uid, e)
             execute("UPDATE trades SET status='FAILED', lifecycle='blocked', note=? WHERE id=?",
                     (f"Order failed: {e}", trade_id))
             _clear_execution_lock(pair, side)
             return {'success': False, 'trade_id': trade_id, 'order_id': None,
                     'mode': mode, 'error': str(e)}
 
-        # 6. Set SL/TP guards
-        admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
-        if admin_id:
+        # 6. Set SL/TP guards (for the trade's owning user)
+        guard_uid = uid or ((SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None)
+        if guard_uid:
             try:
-                set_manual_guard(admin_id, pair, sl=sl_price, tp=tp_price)
+                set_manual_guard(guard_uid, pair, sl=sl_price, tp=tp_price)
             except Exception as e:
                 log.warning("Failed to set guards for trade %d: %s", trade_id, e)
 
@@ -198,13 +205,15 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
                 'mode': mode, 'error': str(e)}
 
 
-def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
+def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT", ctx=None) -> dict:
     """
     Close all open trades for pair, executing on exchange if live.
-    Returns {'success': bool, 'closed_count': int, 'total_pnl': float, 'mode': str, 'errors': list}
+    If ctx (UserContext) provided, uses per-user credentials and closes only that user's trades.
     """
     from exchange import market_price, place_market_order
-    mode = 'PAPER' if SETTINGS.PAPER_TRADING else 'LIVE'
+    is_paper = ctx.paper_trading if ctx else SETTINGS.PAPER_TRADING
+    uid = ctx.user_id if ctx else None
+    mode = 'PAPER' if is_paper else 'LIVE'
     errors = []
     total_pnl = 0.0
     closed = 0
@@ -215,14 +224,13 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
         return {'success': False, 'closed_count': 0, 'total_pnl': 0,
                 'mode': mode, 'errors': [f'Price fetch: {e}']}
 
-    trades = get_open_trades_for_pair(pair)
+    trades = get_open_trades_for_pair(pair, user_id=uid)
     for t in trades:
         try:
-            # Execute opposite order on exchange
             opposite = 'sell' if t['side'] == 'BUY' else 'buy'
-            if not SETTINGS.PAPER_TRADING:
+            if not is_paper:
                 try:
-                    place_market_order(pair, opposite, t['qty'])
+                    place_market_order(pair, opposite, t['qty'], ctx=ctx)
                 except Exception as e:
                     log.error("Exit order failed for trade %s: %s", t['id'], e)
                     errors.append(f"Trade #{t['id']} order failed: {e}")
@@ -236,11 +244,11 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT") -> dict:
             log.error("Exit failed for trade %s: %s", t['id'], e)
             errors.append(f"Trade #{t['id']}: {e}")
 
-    # Clear guards and ATR trail state
-    admin_id = (SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None
-    if admin_id:
+    # Clear guards and ATR trail state (for the owning user)
+    guard_uid = uid or ((SETTINGS.TELEGRAM_ADMIN_IDS or [None])[0] if SETTINGS.TELEGRAM_ADMIN_IDS else None)
+    if guard_uid:
         try:
-            clear_manual_guard(admin_id, pair, 'all')
+            clear_manual_guard(guard_uid, pair, 'all')
         except Exception:
             pass
 

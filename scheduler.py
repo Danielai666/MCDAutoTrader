@@ -1,7 +1,7 @@
 import time
 import json
 import logging
-from typing import Dict
+from typing import Dict, List
 from config import SETTINGS
 from exchange import fetch_ohlcv, market_price, health_check
 from strategy import tf_signal, merge_mtf, build_score_breakdown
@@ -31,16 +31,15 @@ async def _with_lock(name: str, coro):
         _running_jobs.discard(name)
 
 
+def _get_autotrade_user_ids() -> List[int]:
+    """Return list of user_ids with autotrade_enabled=1."""
+    rows = fetchall("SELECT user_id FROM users WHERE autotrade_enabled=1")
+    return [int(r[0]) for r in rows] if rows else []
+
+
 def _is_autotrade_enabled() -> bool:
-    """Check if any admin has autotrade_enabled=1."""
-    admin_ids = SETTINGS.TELEGRAM_ADMIN_IDS
-    if not admin_ids:
-        return False
-    for aid in admin_ids:
-        row = fetchone("SELECT autotrade_enabled FROM users WHERE user_id=?", (aid,))
-        if row and row[0] and int(row[0]) == 1:
-            return True
-    return False
+    """Backward compat: True if any user has autotrade on."""
+    return len(_get_autotrade_user_ids()) > 0
 
 
 async def _compute_signals(pair: str = None) -> Dict:
@@ -89,7 +88,7 @@ def _format(features: Dict, dec: Dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def _analyze_pair(app: Application, pair: str) -> dict:
+async def _analyze_pair(app: Application, pair: str, user_id: int = None) -> dict:
     """Analyze a single pair. Returns structured result."""
     features = await _compute_signals(pair)
     dec = await decide_async(features)
@@ -99,7 +98,8 @@ async def _analyze_pair(app: Application, pair: str) -> dict:
     try:
         from pair_manager import update_pair_signal
         merged = features.get('merged', {})
-        update_pair_signal(pair, merged.get('merged_direction', 'HOLD'), merged.get('merged_score', 0))
+        update_pair_signal(pair, merged.get('merged_direction', 'HOLD'),
+                          merged.get('merged_score', 0), user_id)
     except Exception:
         pass
 
@@ -107,16 +107,17 @@ async def _analyze_pair(app: Application, pair: str) -> dict:
 
 
 # -------------------------------------------------------------------
-# Autonomous execution engine
+# Per-user autonomous execution engine
 # -------------------------------------------------------------------
-async def _execute_autonomous_cycle(app: Application, pair_results: list) -> list:
-    """Process all analyzed pairs: exits first, then ranked entries. Returns action log."""
+async def _execute_autonomous_cycle_for_user(app: Application, ctx, pair_results: list) -> list:
+    """Execute trades for a single user based on shared market analysis."""
     action_log = []
+    uid = ctx.user_id
 
-    # Cache equity/drawdown once per cycle to avoid redundant market_price() calls
+    # Cache equity/drawdown once per user per cycle
     try:
-        _cached_equity = get_equity_status()
-        _cached_dd_scale = drawdown_position_scale()
+        _cached_equity = get_equity_status(ctx)
+        _cached_dd_scale = drawdown_position_scale(ctx)
     except Exception:
         _cached_equity = None
         _cached_dd_scale = 1.0
@@ -125,12 +126,12 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
     for r in pair_results:
         dec = r['decision']
         if dec.get('decision') == 'EXIT' and SETTINGS.ENABLE_EXIT_AUTOMATION:
-            result = execute_autonomous_exit(r['pair'], 'AI_EXIT')
+            result = execute_autonomous_exit(r['pair'], f'AI_EXIT_u{uid}', ctx=ctx)
             if result['closed_count'] > 0:
                 msg = f"EXIT {r['pair']}: closed {result['closed_count']} (PnL: ${result['total_pnl']:.2f}, {result['mode']})"
                 action_log.append(msg)
-                execute('INSERT INTO signals(ts,pair,tf,direction,reason) VALUES(?,?,?,?,?)',
-                        (int(time.time()), r['pair'], 'MTF', 'SELL', 'AUTO EXIT'))
+                execute('INSERT INTO signals(ts,pair,tf,direction,reason,user_id) VALUES(?,?,?,?,?,?)',
+                        (int(time.time()), r['pair'], 'MTF', 'SELL', 'AUTO EXIT', uid))
 
     # 2. Collect and rank ENTER candidates
     enter_candidates = [r for r in pair_results if r['decision'].get('decision') == 'ENTER']
@@ -162,14 +163,14 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
             action_log.append(f"SKIP {pair_name}: {skip_reason}")
             continue
 
-        # Risk gate
-        allowed, block_reason = can_enter_enhanced(pair_name, side)
+        # Risk gate (per-user via ctx)
+        allowed, block_reason = can_enter_enhanced(pair_name, side, ctx=ctx)
         if not allowed:
             action_log.append(f"BLOCKED {pair_name}: {block_reason}")
             continue
 
-        # Portfolio exposure check
-        can_trade, current_exp, remaining_usd = portfolio_exposure_check()
+        # Portfolio exposure check (per-user via ctx)
+        can_trade, current_exp, remaining_usd = portfolio_exposure_check(ctx)
         if not can_trade:
             action_log.append(f"PORTFOLIO FULL (${current_exp:.0f}), stopping entries")
             break
@@ -185,8 +186,9 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
         if atr_val <= 0 or px <= 0:
             continue
 
-        # Confidence-scaled position size (use cached dd_scale to avoid redundant API calls)
-        qty = confidence_scaled_position_size(px, atr_val, dec['confidence'], setup_quality, remaining_usd, dd_scale=_cached_dd_scale)
+        # Confidence-scaled position size (per-user via ctx + cached dd_scale)
+        qty = confidence_scaled_position_size(px, atr_val, dec['confidence'], setup_quality,
+                                              remaining_usd, dd_scale=_cached_dd_scale, ctx=ctx)
         if qty <= 0:
             action_log.append(f"SKIP {pair_name}: qty=0 after scaling")
             continue
@@ -205,11 +207,12 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
             'atr_at_entry': atr_val,
         })
 
-        # EXECUTE THE TRADE
+        # EXECUTE THE TRADE (per-user via ctx)
         result = execute_autonomous_trade(
             pair_name, side, qty, px, sl, tp,
             reason=f"AUTO conf={dec['confidence']:.2f} q={setup_quality:.2f}",
-            entry_snapshot=entry_snapshot
+            entry_snapshot=entry_snapshot,
+            ctx=ctx
         )
 
         if result['success']:
@@ -217,8 +220,8 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
             msg = (f"TRADE {result['mode']}: {side} {qty:.6f} {pair_name} @ ${px:.2f}\n"
                    f"  SL=${sl:.2f} TP=${tp:.2f} | conf={dec['confidence']:.2f} quality={setup_quality:.2f}")
             action_log.append(msg)
-            execute('INSERT INTO signals(ts,pair,tf,direction,reason) VALUES(?,?,?,?,?)',
-                    (int(time.time()), pair_name, 'MTF', side, f'AUTO ENTER conf={dec["confidence"]:.2f}'))
+            execute('INSERT INTO signals(ts,pair,tf,direction,reason,user_id) VALUES(?,?,?,?,?,?)',
+                    (int(time.time()), pair_name, 'MTF', side, f'AUTO ENTER conf={dec["confidence"]:.2f}', uid))
         else:
             action_log.append(f"FAILED {pair_name}: {result.get('error', 'unknown')}")
 
@@ -226,66 +229,94 @@ async def _execute_autonomous_cycle(app: Application, pair_results: list) -> lis
 
 
 # -------------------------------------------------------------------
-# Main cycle
+# Main cycle — two-phase: shared analysis + per-user execution
 # -------------------------------------------------------------------
-async def run_cycle_once(app: Application, notify: bool = True, pair: str = None) -> str:
-    """Run analysis for one or all active pairs. Execute trades if autotrade is ON."""
+async def run_cycle_once(app: Application, notify: bool = True,
+                         pair: str = None, user_id: int = None) -> str:
+    """Run analysis. If user_id given, scope to that user. Otherwise multi-user cycle."""
 
-    # Single pair request (manual /signal) — analyze only, no autonomous execution
+    # Single pair request (manual /signal) — analyze only, no execution
     if pair:
-        result = await _analyze_pair(app, pair)
+        result = await _analyze_pair(app, pair, user_id)
         txt = result['text'] + "Decision: " + result['decision'].get('decision', 'HOLD') + ".\n"
         return txt
 
-    # Multi-pair cycle
-    from pair_manager import get_active_pairs
-    pairs = get_active_pairs()
+    # === PHASE 1: Shared market analysis ===
+    # Get union of all users' active pairs (market data is shared)
+    from pair_manager import get_active_pairs, get_all_active_pairs_union
+    all_pairs = get_all_active_pairs_union()
 
-    # Step 1: Analyze ALL pairs
-    pair_results = []
-    for p in pairs:
+    # Analyze each pair once (shared across users)
+    market_data = {}
+    for p in all_pairs:
         try:
             r = await _analyze_pair(app, p)
-            pair_results.append(r)
+            market_data[p] = r
         except Exception as e:
-            pair_results.append({'pair': p, 'text': f"Error on {p}: {e}\n",
-                                 'decision': {'decision': 'HOLD', 'confidence': 0}, 'features': {}})
+            market_data[p] = {'pair': p, 'text': f"Error on {p}: {e}\n",
+                              'decision': {'decision': 'HOLD', 'confidence': 0}, 'features': {}}
             log.exception("Analysis failed for %s", p)
 
-    # Step 2: Signal summary
-    signal_summary = "\n---\n".join(r['text'] for r in pair_results)
+    # Signal summary (shared)
+    signal_summary = "\n---\n".join(r['text'] for r in market_data.values())
 
-    # Step 3: Autonomous execution (only if autotrade enabled)
-    action_log = []
-    autotrade_on = _is_autotrade_enabled()
+    # === PHASE 2: Per-user execution ===
+    autotrade_uids = _get_autotrade_user_ids()
+    combined_parts = [signal_summary]
 
-    if autotrade_on:
-        action_log = await _execute_autonomous_cycle(app, pair_results)
-        actions_txt = "\n".join(action_log) if action_log else "No actions — all HOLD."
+    if autotrade_uids:
+        from user_context import UserContext
 
-        # Append equity/drawdown status
-        try:
-            eq = get_equity_status()
-            dd_scale = drawdown_position_scale()
-            eq_line = (f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%} | "
-                       f"Size scale: {dd_scale:.0%}")
-        except Exception:
-            eq_line = ""
-
-        combined = f"{signal_summary}\n\n=== Autonomous Actions ===\n{actions_txt}"
-        if eq_line:
-            combined += f"\n\n{eq_line}"
-    else:
-        combined = f"{signal_summary}\nAutoTrade: OFF (signal report only)"
-
-    # Step 4: Notify
-    if notify:
-        users = fetchall('SELECT user_id FROM users')
-        for (uid,) in users:
+        for uid in autotrade_uids:
             try:
-                await app.bot.send_message(chat_id=uid, text=combined)
-            except Exception:
-                pass
+                ctx = UserContext.load(uid)
+                user_pairs = get_active_pairs(uid)
+                user_results = [market_data[p] for p in user_pairs if p in market_data]
+
+                if not user_results:
+                    continue
+
+                action_log = await _execute_autonomous_cycle_for_user(app, ctx, user_results)
+                actions_txt = "\n".join(action_log) if action_log else "No actions."
+
+                # Per-user equity status
+                try:
+                    eq = get_equity_status(ctx)
+                    dd_scale = drawdown_position_scale(ctx)
+                    eq_line = (f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%} | "
+                               f"Size scale: {dd_scale:.0%}")
+                except Exception:
+                    eq_line = ""
+
+                user_section = f"\n=== User {uid} Actions ===\n{actions_txt}"
+                if eq_line:
+                    user_section += f"\n{eq_line}"
+                combined_parts.append(user_section)
+
+                # Notify this user specifically
+                if notify:
+                    user_msg = f"{signal_summary}\n{user_section}"
+                    try:
+                        await app.bot.send_message(chat_id=uid, text=user_msg)
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                log.exception("Autonomous cycle failed for user %d: %s", uid, e)
+    else:
+        combined_parts.append("\nAutoTrade: OFF (signal report only)")
+
+    combined = "\n".join(combined_parts)
+
+    # Notify users without autotrade (signal report only)
+    if notify:
+        non_auto_users = fetchall("SELECT user_id FROM users WHERE autotrade_enabled=0 OR autotrade_enabled IS NULL")
+        for (uid,) in (non_auto_users or []):
+            if uid not in autotrade_uids:
+                try:
+                    await app.bot.send_message(chat_id=uid, text=f"{signal_summary}\nAutoTrade: OFF")
+                except Exception:
+                    pass
 
     return combined
 
@@ -310,12 +341,14 @@ async def _health_check_job(app: Application):
 
 
 async def _daily_report_job(app: Application):
+    """Send per-user daily reports."""
     try:
         from reports import daily_report
-        report = daily_report()
-        for aid in SETTINGS.TELEGRAM_ADMIN_IDS:
+        users = fetchall("SELECT user_id FROM users")
+        for (uid,) in (users or []):
             try:
-                await app.bot.send_message(chat_id=aid, text=f"Daily Report\n{report}")
+                report = daily_report(user_id=uid)
+                await app.bot.send_message(chat_id=uid, text=f"Daily Report\n{report}")
             except Exception:
                 pass
     except Exception as e:
