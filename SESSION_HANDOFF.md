@@ -3,8 +3,8 @@
 
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Date: 2026-04-13
-> Total: 30 Python files, ~7,943 lines of code
-> Latest commit: `19fa95f` (Idempotency, mode gating, locks, panic_stop)
+> Total: 31 Python files, ~8,494 lines of code
+> Latest commit: `7e46ce9` (Fundamental gate — news/event risk filter)
 
 ---
 
