@@ -1486,6 +1486,42 @@ async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run backtest. Usage: /backtest <pair> [days] [timeframe]
+    Example: /backtest BTC/USDT 30 1h"""
+    uid = update.effective_user.id
+    args = context.args or []
+    pair = args[0] if len(args) > 0 else SETTINGS.PAIR
+    days = int(args[1]) if len(args) > 1 else 30
+    timeframe = args[2] if len(args) > 2 else '1h'
+
+    msg = await update.message.reply_text(f"Running backtest: {pair} {timeframe} ({days}d)...")
+
+    try:
+        from backtest import run_backtest, format_backtest_result, render_backtest_card
+        result = run_backtest(pair, days=days, timeframe=timeframe,
+                              capital=SETTINGS.CAPITAL_USD, risk_pct=SETTINGS.RISK_PER_TRADE)
+
+        if result.total_bars < 50:
+            await msg.edit_text(f"Not enough data for backtest ({result.total_bars} bars).",
+                                reply_markup=back_keyboard())
+            return
+
+        summary = format_backtest_result(result)
+
+        try:
+            png = render_backtest_card(result)
+            import io as _io
+            await msg.delete()
+            await update.effective_chat.send_photo(
+                photo=_io.BytesIO(png), caption=summary, reply_markup=back_keyboard())
+        except Exception:
+            await msg.edit_text(summary, reply_markup=back_keyboard())
+    except Exception as e:
+        log.error("Backtest failed: %s", e)
+        await msg.edit_text(f"Backtest failed: {e}", reply_markup=back_keyboard())
+
+
 async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Emergency stop: disable trading + close all positions for this user."""
     uid = update.effective_user.id
@@ -1758,6 +1794,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("setkeys", setkeys_cmd))
     app.add_handler(CommandHandler("myaccount", myaccount_cmd))
     app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
+    app.add_handler(CommandHandler("backtest", rate_limited(backtest_cmd)))
 
     # --- Screenshot analysis ---
     app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))
