@@ -20,6 +20,15 @@ log = logging.getLogger(__name__)
 # Job locking
 _running_jobs = set()
 
+# Per-user execution locks (prevent concurrent execution for same user)
+import asyncio
+_user_locks: dict = {}
+
+def _get_user_lock(uid: int) -> asyncio.Lock:
+    if uid not in _user_locks:
+        _user_locks[uid] = asyncio.Lock()
+    return _user_locks[uid]
+
 async def _with_lock(name: str, coro):
     if name in _running_jobs:
         log.info("Job '%s' already running, skipping", name)
@@ -113,6 +122,42 @@ async def _execute_autonomous_cycle_for_user(app: Application, ctx, pair_results
     """Execute trades for a single user based on shared market analysis."""
     action_log = []
     uid = ctx.user_id
+    cycle_ts = int(time.time())
+
+    # Mode gating
+    if getattr(ctx, 'panic_stopped', False):
+        return [f"PANIC STOP active for user {uid}, skipping."]
+
+    mode = getattr(ctx, 'mode', 'signal_only')
+    ai_mode = getattr(ctx, 'ai_mode', 'signal_only')
+
+    if mode == 'signal_only':
+        return [f"Signal-only mode, no execution."]
+
+    if ai_mode == 'manual_confirm':
+        # Queue signals for user confirmation instead of auto-executing
+        for r in pair_results:
+            dec = r['decision']
+            if dec.get('decision') in ('ENTER', 'EXIT'):
+                pair_name = r['pair']
+                side = dec.get('side', 'BUY')
+                conf = dec.get('confidence', 0)
+                action_log.append(f"PENDING CONFIRM: {side} {pair_name} (conf={conf:.0%})")
+                try:
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"Execute {side} {pair_name}", callback_data=f"confirm_trade_{pair_name}_{side}"),
+                         InlineKeyboardButton("Skip", callback_data="confirm_skip")]
+                    ])
+                    await app.bot.send_message(
+                        chat_id=uid,
+                        text=f"Trade candidate: {side} {pair_name}\nConfidence: {conf:.0%}\nScore: {r['features'].get('merged', {}).get('merged_score', 0):.2f}",
+                        reply_markup=kb)
+                except Exception:
+                    pass
+        return action_log
+
+    # ai_mode == 'ai_full': proceed with autonomous execution
 
     # Cache equity/drawdown once per user per cycle
     try:
@@ -207,12 +252,14 @@ async def _execute_autonomous_cycle_for_user(app: Application, ctx, pair_results
             'atr_at_entry': atr_val,
         })
 
-        # EXECUTE THE TRADE (per-user via ctx)
+        # EXECUTE THE TRADE (per-user via ctx, with operation_id for idempotency)
+        op_id = f"{uid}:{pair_name}:{side}:{cycle_ts}"
         result = execute_autonomous_trade(
             pair_name, side, qty, px, sl, tp,
             reason=f"AUTO conf={dec['confidence']:.2f} q={setup_quality:.2f}",
             entry_snapshot=entry_snapshot,
-            ctx=ctx
+            ctx=ctx,
+            operation_id=op_id
         )
 
         if result['success']:
@@ -268,38 +315,45 @@ async def run_cycle_once(app: Application, notify: bool = True,
         from user_context import UserContext
 
         for uid in autotrade_uids:
+            # Per-user lock prevents concurrent execution for same user
+            lock = _get_user_lock(uid)
+            if lock.locked():
+                log.info("User %d execution still running, skipping this cycle", uid)
+                continue
+
             try:
-                ctx = UserContext.load(uid)
-                user_pairs = get_active_pairs(uid)
-                user_results = [market_data[p] for p in user_pairs if p in market_data]
+                async with lock:
+                    ctx = UserContext.load(uid)
+                    user_pairs = get_active_pairs(uid)
+                    user_results = [market_data[p] for p in user_pairs if p in market_data]
 
-                if not user_results:
-                    continue
+                    if not user_results:
+                        continue
 
-                action_log = await _execute_autonomous_cycle_for_user(app, ctx, user_results)
-                actions_txt = "\n".join(action_log) if action_log else "No actions."
+                    action_log = await _execute_autonomous_cycle_for_user(app, ctx, user_results)
+                    actions_txt = "\n".join(action_log) if action_log else "No actions."
 
-                # Per-user equity status
-                try:
-                    eq = get_equity_status(ctx)
-                    dd_scale = drawdown_position_scale(ctx)
-                    eq_line = (f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%} | "
-                               f"Size scale: {dd_scale:.0%}")
-                except Exception:
-                    eq_line = ""
-
-                user_section = f"\n=== User {uid} Actions ===\n{actions_txt}"
-                if eq_line:
-                    user_section += f"\n{eq_line}"
-                combined_parts.append(user_section)
-
-                # Notify this user specifically
-                if notify:
-                    user_msg = f"{signal_summary}\n{user_section}"
+                    # Per-user equity status
                     try:
-                        await app.bot.send_message(chat_id=uid, text=user_msg)
+                        eq = get_equity_status(ctx)
+                        dd_scale = drawdown_position_scale(ctx)
+                        eq_line = (f"Equity: ${eq['equity']:,.2f} | DD: {eq['drawdown_pct']:.1%} | "
+                                   f"Size scale: {dd_scale:.0%}")
                     except Exception:
-                        pass
+                        eq_line = ""
+
+                    user_section = f"\n=== User {uid} Actions ===\n{actions_txt}"
+                    if eq_line:
+                        user_section += f"\n{eq_line}"
+                    combined_parts.append(user_section)
+
+                    # Notify this user specifically
+                    if notify:
+                        user_msg = f"{signal_summary}\n{user_section}"
+                        try:
+                            await app.bot.send_message(chat_id=uid, text=user_msg)
+                        except Exception:
+                            pass
 
             except Exception as e:
                 log.exception("Autonomous cycle failed for user %d: %s", uid, e)

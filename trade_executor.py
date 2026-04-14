@@ -97,12 +97,14 @@ def _clear_execution_lock(pair: str, side: str):
 def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
                               sl_price: float, tp_price: float,
                               reason: str = "", entry_snapshot: str = None,
-                              ctx=None) -> dict:
+                              ctx=None, operation_id: str = None) -> dict:
     """
     Full trade execution: DB record + exchange order + SL/TP guards.
     If ctx (UserContext) is provided, uses per-user settings and credentials.
+    If operation_id is provided, checks for duplicate execution (idempotency).
     Hardened sequence:
-      1. Dedup check
+      0. Idempotency check (operation_id)
+      1. Dedup check (10s lock)
       2. Create DB record (status=PENDING)
       3. Place exchange order
       4. On success: update DB with order_id, set status=OPEN
@@ -110,10 +112,24 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
       6. Set SL/TP guards
     Returns {'success': bool, 'trade_id': int, 'order_id': str, 'mode': str, 'error': str}
     """
+    import json as _json
+
     if SETTINGS.DRY_RUN_MODE:
         log.info("DRY RUN: %s %s %.6f %s @ %.2f (SL=%.2f TP=%.2f)",
                  side, qty, qty, pair, price, sl_price, tp_price)
         return {'success': True, 'trade_id': 0, 'order_id': 'dry-run', 'mode': 'DRY_RUN', 'error': ''}
+
+    # 0. Idempotency check
+    if operation_id:
+        from storage import check_operation_id
+        existing = check_operation_id(operation_id)
+        if existing:
+            log.info("Idempotent skip: operation %s already executed", operation_id)
+            try:
+                return _json.loads(existing['result_json'])
+            except Exception:
+                return {'success': True, 'trade_id': 0, 'order_id': 'idempotent',
+                        'mode': 'IDEMPOTENT', 'error': ''}
 
     # 1. Dedup check
     if not _check_execution_lock(pair, side):
@@ -188,8 +204,15 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
             except Exception as e:
                 log.warning("Failed to set guards for trade %d: %s", trade_id, e)
 
-        return {'success': True, 'trade_id': trade_id, 'order_id': order_id,
-                'mode': mode, 'error': ''}
+        result = {'success': True, 'trade_id': trade_id, 'order_id': order_id,
+                  'mode': mode, 'error': ''}
+
+        # Record operation for idempotency
+        if operation_id:
+            from storage import record_operation
+            record_operation(operation_id, uid, 'TRADE', pair, side, _json.dumps(result))
+
+        return result
 
     except Exception as e:
         log.exception("Unexpected error in execute_autonomous_trade: %s", e)

@@ -161,6 +161,44 @@ def daily_report(user_id: int = None, pair: str = None) -> str:
     )
 
 
+def format_trade_close_report(trade_id: int) -> str:
+    """Generate a close report for a single trade with PnL, R:R, duration."""
+    import json
+    row = fetchone(
+        "SELECT pair, side, qty, entry, exit_price, pnl, ts_open, ts_close, entry_snapshot "
+        "FROM trades WHERE id=?", (trade_id,))
+    if not row:
+        return ""
+    pair, side, qty, entry, exit_price, pnl, ts_open, ts_close, snap_json = row
+    qty = float(qty) if qty else 0
+    entry = float(entry) if entry else 0
+    exit_price = float(exit_price) if exit_price else 0
+    pnl = float(pnl) if pnl else 0
+    duration_mins = ((ts_close or 0) - (ts_open or 0)) / 60
+
+    rr_txt = ""
+    if snap_json:
+        try:
+            snap = json.loads(snap_json)
+            atr = snap.get('atr_at_entry', 0)
+            if atr > 0:
+                from config import SETTINGS
+                risk_dist = atr * SETTINGS.ATR_SL_MULTIPLIER
+                reward = abs(exit_price - entry)
+                rr = reward / risk_dist if risk_dist > 0 else 0
+                rr_txt = f" | R:R 1:{rr:.1f}"
+        except Exception:
+            pass
+
+    sign = '+' if pnl >= 0 else ''
+    return (
+        f"Trade Closed #{trade_id}\n"
+        f"{pair} {side} {qty:g} @ {entry:g} -> {exit_price:g}\n"
+        f"PnL: {sign}${pnl:.2f}{rr_txt}\n"
+        f"Duration: {duration_mins:.0f}m"
+    )
+
+
 def blocked_trades_summary(user_id: int = None, days: int = 7) -> str:
     start = int(time.time()) - (days * 86400)
     if user_id is not None:

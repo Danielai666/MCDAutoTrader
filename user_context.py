@@ -36,6 +36,11 @@ class UserContext:
     capital_per_trade_pct: float = 0.10
     ai_fusion_policy: str = 'local_only'
 
+    # Mode system
+    mode: str = 'signal_only'         # signal_only | paper | live
+    ai_mode: str = 'signal_only'      # signal_only | manual_confirm | ai_full
+    panic_stopped: bool = False
+
     @classmethod
     def load(cls, user_id: int) -> 'UserContext':
         """Load user settings from database and decrypt exchange keys."""
@@ -70,7 +75,7 @@ class UserContext:
             except Exception as e:
                 log.warning("Failed to decrypt credentials for user %d: %s", user_id, e)
 
-        return cls(
+        ctx = cls(
             user_id=user_id,
             tg_username=tg_username or '',
             tier=tier or 'BASIC',
@@ -88,6 +93,40 @@ class UserContext:
             capital_per_trade_pct=float(cptp) if cptp else SETTINGS.CAPITAL_PER_TRADE_PCT,
             ai_fusion_policy=aifp or SETTINGS.AI_FUSION_POLICY,
         )
+
+        # Load from user_settings table (mode, ai_mode, panic_stop)
+        try:
+            from storage import get_user_settings
+            settings = get_user_settings(user_id)
+            if settings:
+                ctx.mode = settings.get('mode') or 'signal_only'
+                ctx.ai_mode = settings.get('ai_mode') or 'signal_only'
+                ctx.panic_stopped = bool(settings.get('panic_stop'))
+                if settings.get('default_exchange'):
+                    ctx.exchange_name = settings['default_exchange']
+                # Derive paper_trading from mode
+                ctx.paper_trading = ctx.mode != 'live'
+                ctx.trade_mode = 'LIVE' if ctx.mode == 'live' else 'PAPER'
+        except Exception:
+            pass
+
+        # Try credentials table (V2 envelope encryption) with fallback to users table
+        try:
+            from storage import get_credential
+            cred = get_credential(user_id, 'ccxt')
+            if cred:
+                from crypto_utils import decrypt_exchange_keys
+                dk, ds = decrypt_exchange_keys(
+                    cred['api_key_enc'], cred['api_secret_enc'],
+                    cred.get('data_key_enc', ''), cred.get('encryption_version', 1))
+                if dk and ds:
+                    ctx.exchange_key = dk
+                    ctx.exchange_secret = ds
+                    ctx.exchange_name = cred.get('exchange_id') or ctx.exchange_name
+        except Exception:
+            pass
+
+        return ctx
 
     @classmethod
     def from_settings(cls, user_id: int) -> 'UserContext':

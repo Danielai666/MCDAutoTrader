@@ -34,6 +34,21 @@ LAST_NOTIFY = {}
 NOTIFY_COOLDOWN = 300
 
 # ---------------------------
+# Rate limiter
+# ---------------------------
+_rate_limits: dict = {}  # uid -> list of timestamps
+
+def _check_rate_limit(uid: int, limit: int = 10, window: int = 60) -> bool:
+    """Returns True if allowed, False if rate limited."""
+    now = time.time()
+    times = _rate_limits.setdefault(uid, [])
+    times[:] = [t for t in times if now - t < window]
+    if len(times) >= limit:
+        return False
+    times.append(now)
+    return True
+
+# ---------------------------
 # Inline Keyboard Menus
 # ---------------------------
 def main_menu_keyboard():
@@ -545,6 +560,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     msg_id = query.message.message_id
     app = context.application
+
+    # Rate limit
+    if not _check_rate_limit(uid):
+        await query.edit_message_text("Rate limit exceeded. Try again in a moment.")
+        return
 
     # --- Main Menu ---
     if data == "cmd_menu":
@@ -1230,6 +1250,41 @@ async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
+async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Emergency stop: disable trading + close all positions for this user."""
+    uid = update.effective_user.id
+    # Set panic_stop in user_settings
+    from storage import upsert_user_settings
+    upsert_user_settings(uid, panic_stop=1)
+    # Disable autotrade
+    execute("UPDATE users SET autotrade_enabled=0 WHERE user_id=?", (uid,))
+
+    # Close all open trades for this user
+    closed = 0
+    total_pnl = 0.0
+    try:
+        from user_context import UserContext
+        ctx = UserContext.load(uid)
+        from pair_manager import get_active_pairs
+        from trade_executor import execute_autonomous_exit
+        for pair in get_active_pairs(uid):
+            result = execute_autonomous_exit(pair, "PANIC_STOP", ctx=ctx)
+            closed += result.get('closed_count', 0)
+            total_pnl += result.get('total_pnl', 0)
+    except Exception as e:
+        log.error("Panic stop close failed for user %d: %s", uid, e)
+
+    lines = [
+        "PANIC STOP ACTIVATED",
+        f"AutoTrade: DISABLED",
+        f"Positions closed: {closed}",
+        f"PnL: ${total_pnl:+.2f}" if closed > 0 else "",
+        "",
+        "To resume: re-enable autotrade and clear panic stop.",
+    ]
+    await update.message.reply_text("\n".join(l for l in lines if l), reply_markup=back_keyboard())
+
+
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exchange reconciliation. Usage: /reconcile [fix]"""
     uid = update.effective_user.id
@@ -1384,6 +1439,7 @@ def build_app() -> Application:
     # --- Multi-user commands ---
     app.add_handler(CommandHandler("setkeys", setkeys_cmd))
     app.add_handler(CommandHandler("myaccount", myaccount_cmd))
+    app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
 
     # Callback handler for inline buttons
     app.add_handler(CallbackQueryHandler(button_callback))
