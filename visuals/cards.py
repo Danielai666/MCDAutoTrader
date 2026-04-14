@@ -468,3 +468,208 @@ def render_daily_report_card(equity_history: list = None,
     result = _fig_to_bytes(fig)
     _set_cached(cache_key, result)
     return result
+
+
+# -------------------------------------------------------------------
+# 4) Position Card
+# -------------------------------------------------------------------
+def render_position_card(positions: list) -> bytes:
+    """Render open positions with entry/SL/TP, current price, unrealized PnL."""
+    n = len(positions) or 1
+    fig_h = max(3, min(6, 1.5 + n * 0.8))
+    fig = plt.figure(figsize=(10.67, fig_h), facecolor=_DARK_BG)
+    fig.text(0.5, 0.97, 'Open Positions', fontsize=14, fontweight='bold',
+             color=_TEXT_COLOR, ha='center', va='top')
+    if not positions:
+        fig.text(0.5, 0.5, 'No open positions', fontsize=16, color=_TEXT_COLOR,
+                 alpha=0.5, ha='center', va='center')
+        return _fig_to_bytes(fig)
+    ax = fig.add_axes([0.04, 0.05, 0.92, 0.85])
+    ax.set_facecolor(_PANEL_BG)
+    ax.axis('off')
+    for i, pos in enumerate(positions):
+        y = 0.92 - i * (0.85 / max(n, 1))
+        pnl = pos.get('pnl', 0)
+        pnl_color = _ACCENT_GREEN if pnl >= 0 else _ACCENT_RED
+        side_color = _ACCENT_GREEN if pos.get('side') == 'BUY' else _ACCENT_RED
+        ax.text(0.02, y, f"{pos.get('pair', '?')}", fontsize=11, fontweight='bold',
+                color=_TEXT_COLOR, transform=ax.transAxes, va='top')
+        ax.text(0.18, y, pos.get('side', '?'), fontsize=10, fontweight='bold',
+                color=side_color, transform=ax.transAxes, va='top')
+        entry = pos.get('entry', 0)
+        current = pos.get('current_price', entry)
+        ax.text(0.28, y, f"Entry: {entry:g}", fontsize=8, color=_TEXT_COLOR,
+                alpha=0.7, transform=ax.transAxes, va='top')
+        ax.text(0.46, y, f"Now: {current:g}", fontsize=8, color=_ACCENT_BLUE,
+                transform=ax.transAxes, va='top')
+        sl = pos.get('sl', 0)
+        tp = pos.get('tp', 0)
+        if sl and tp and entry:
+            total_range = abs(tp - sl)
+            if total_range > 0:
+                if pos.get('side') == 'BUY':
+                    progress = (current - sl) / total_range
+                else:
+                    progress = (sl - current) / total_range
+                progress = max(0, min(1, progress))
+                bar_x, bar_w = 0.62, 0.18
+                ax.barh(y - 0.02, bar_w, height=0.025, left=bar_x,
+                        color=_GRID_COLOR, alpha=0.3, transform=ax.transAxes)
+                ax.barh(y - 0.02, bar_w * progress, height=0.025, left=bar_x,
+                        color=_ACCENT_GREEN if progress > 0.5 else _ACCENT_YELLOW,
+                        alpha=0.6, transform=ax.transAxes)
+        sign = '+' if pnl >= 0 else ''
+        ax.text(0.88, y, f"{sign}${pnl:.2f}", fontsize=10, fontweight='bold',
+                color=pnl_color, transform=ax.transAxes, va='top', ha='right')
+    return _fig_to_bytes(fig)
+
+
+# -------------------------------------------------------------------
+# 5) Risk Dashboard Card
+# -------------------------------------------------------------------
+def render_risk_dashboard_card(risk_data: dict) -> bytes:
+    """Render risk gauges: exposure, daily loss, drawdown, correlation, event risk."""
+    cached = _get_cached('risk_dashboard', 60)
+    if cached:
+        return cached
+    fig = plt.figure(figsize=(10.67, 5), facecolor=_DARK_BG)
+    gs = fig.add_gridspec(1, 5, wspace=0.3, left=0.04, right=0.96, top=0.82, bottom=0.15)
+    fig.text(0.5, 0.95, 'Risk Dashboard', fontsize=14, fontweight='bold',
+             color=_TEXT_COLOR, ha='center', va='top')
+    labels = ['Exposure', 'Daily Loss', 'Drawdown', 'Correlation', 'Event Risk']
+    values = [
+        risk_data.get('exposure_pct', 0) * 100,
+        risk_data.get('daily_loss_pct', 0) * 100,
+        risk_data.get('drawdown_pct', 0) * 100,
+        risk_data.get('correlation_risk', 50),
+        risk_data.get('event_risk_score', 50),
+    ]
+    for i, (label, val) in enumerate(zip(labels, values)):
+        ax = fig.add_subplot(gs[0, i])
+        draw_gauge(ax, min(100, val), label, size=0.7)
+    reasons = risk_data.get('blocked_reasons', [])
+    if reasons:
+        fig.text(0.5, 0.06, 'Blocked: ' + ' | '.join(reasons[:3]),
+                 fontsize=9, color=_ACCENT_RED, ha='center', va='center')
+    result = _fig_to_bytes(fig)
+    _set_cached('risk_dashboard', result)
+    return result
+
+
+# -------------------------------------------------------------------
+# 6) Watchlist Heatmap Card
+# -------------------------------------------------------------------
+def render_heatmap_card(heatmap_data: list, timeframes: list = None) -> bytes:
+    """Render pairs x timeframes heatmap. Score range: -2..+2."""
+    cached = _get_cached('heatmap', 120)
+    if cached:
+        return cached
+    if not timeframes:
+        timeframes = ['15m', '1h', '4h', '1d']
+    pairs = [d.get('pair', '?') for d in heatmap_data][:10]
+    if not pairs:
+        fig = plt.figure(figsize=(8, 3), facecolor=_DARK_BG)
+        fig.text(0.5, 0.5, 'No pairs to display', color=_TEXT_COLOR, ha='center', fontsize=14)
+        return _fig_to_bytes(fig)
+    matrix = []
+    for d in heatmap_data[:10]:
+        row = [d.get('scores', {}).get(tf, 0) for tf in timeframes]
+        matrix.append(row)
+    data = np.array(matrix)
+    fig = plt.figure(figsize=(max(6, len(timeframes) * 1.5 + 2), max(3, len(pairs) * 0.5 + 1.5)),
+                     facecolor=_DARK_BG)
+    ax = fig.add_axes([0.18, 0.15, 0.75, 0.72])
+    ax.set_facecolor(_PANEL_BG)
+    fig.text(0.5, 0.95, 'Watchlist Heatmap', fontsize=14, fontweight='bold',
+             color=_TEXT_COLOR, ha='center', va='top')
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list('rg', [_ACCENT_RED, _ACCENT_YELLOW, _ACCENT_GREEN])
+    ax.imshow(data, aspect='auto', cmap=cmap, vmin=-2, vmax=2, interpolation='nearest')
+    ax.set_xticks(range(len(timeframes)))
+    ax.set_xticklabels(timeframes, fontsize=9, color=_TEXT_COLOR)
+    ax.set_yticks(range(len(pairs)))
+    ax.set_yticklabels(pairs, fontsize=9, color=_TEXT_COLOR)
+    ax.tick_params(length=0)
+    for i in range(len(pairs)):
+        for j in range(len(timeframes)):
+            val = data[i, j]
+            label = 'BUY' if val > 0.5 else 'SELL' if val < -0.5 else '-'
+            ax.text(j, i, label, ha='center', va='center', fontsize=7,
+                    color='white' if abs(val) > 0.8 else _TEXT_COLOR, fontweight='bold')
+    result = _fig_to_bytes(fig)
+    _set_cached('heatmap', result)
+    return result
+
+
+# -------------------------------------------------------------------
+# 7) Guards Card
+# -------------------------------------------------------------------
+def render_guards_card(guards: list) -> bytes:
+    """Render guards overview per pair."""
+    n = len(guards) or 1
+    fig_h = max(3, min(6, 1.2 + n * 0.7))
+    fig = plt.figure(figsize=(10.67, fig_h), facecolor=_DARK_BG)
+    fig.text(0.5, 0.97, 'Active Guards', fontsize=14, fontweight='bold',
+             color=_TEXT_COLOR, ha='center', va='top')
+    if not guards:
+        fig.text(0.5, 0.5, 'No guards set', fontsize=16, color=_TEXT_COLOR,
+                 alpha=0.5, ha='center', va='center')
+        return _fig_to_bytes(fig)
+    ax = fig.add_axes([0.04, 0.05, 0.92, 0.85])
+    ax.set_facecolor(_PANEL_BG)
+    ax.axis('off')
+    for i, g in enumerate(guards):
+        y = 0.92 - i * (0.85 / max(n, 1))
+        ax.text(0.02, y, g.get('pair', '?'), fontsize=11, fontweight='bold',
+                color=_TEXT_COLOR, transform=ax.transAxes, va='top')
+        parts = []
+        if g.get('sl'): parts.append(f"SL: {g['sl']:g}")
+        if g.get('tp'): parts.append(f"TP: {g['tp']:g}")
+        if g.get('trail_pct'): parts.append(f"Trail: {float(g['trail_pct'])*100:.1f}%")
+        if g.get('trail_stop'): parts.append(f"TrailStop: {g['trail_stop']:g}")
+        info = ' | '.join(parts) if parts else 'No guards'
+        ax.text(0.22, y, info, fontsize=9,
+                color=_ACCENT_BLUE if parts else _TEXT_COLOR, alpha=0.8 if parts else 0.4,
+                transform=ax.transAxes, va='top')
+    return _fig_to_bytes(fig)
+
+
+# -------------------------------------------------------------------
+# 8) AI Decision Card
+# -------------------------------------------------------------------
+def render_ai_decision_card(decisions: list) -> bytes:
+    """Render recent AI decisions with confidence bars."""
+    n = len(decisions) or 1
+    fig_h = max(3, min(6, 1.5 + n * 0.6))
+    fig = plt.figure(figsize=(10.67, fig_h), facecolor=_DARK_BG)
+    fig.text(0.5, 0.97, 'AI Decisions', fontsize=14, fontweight='bold',
+             color=_TEXT_COLOR, ha='center', va='top')
+    if not decisions:
+        fig.text(0.5, 0.5, 'No AI decisions yet', fontsize=16, color=_TEXT_COLOR,
+                 alpha=0.5, ha='center', va='center')
+        return _fig_to_bytes(fig)
+    ax = fig.add_axes([0.04, 0.05, 0.92, 0.85])
+    ax.set_facecolor(_PANEL_BG)
+    ax.axis('off')
+    for i, d in enumerate(decisions[:8]):
+        y = 0.92 - i * (0.85 / min(n, 8))
+        action = d.get('action', 'HOLD')
+        conf = d.get('confidence', 0)
+        action_color = _ACCENT_GREEN if action == 'ENTER' else _ACCENT_RED if action == 'EXIT' else _TEXT_COLOR
+        ax.text(0.02, y, d.get('pair', '?'), fontsize=10, fontweight='bold',
+                color=_TEXT_COLOR, transform=ax.transAxes, va='top')
+        ax.text(0.16, y, action, fontsize=9, fontweight='bold',
+                color=action_color, transform=ax.transAxes, va='top')
+        ax.text(0.28, y, d.get('side', '') or '', fontsize=9,
+                color=action_color, transform=ax.transAxes, va='top')
+        bar_x, bar_w = 0.38, 0.30
+        ax.barh(y - 0.015, bar_w, height=0.025, left=bar_x,
+                color=_GRID_COLOR, alpha=0.2, transform=ax.transAxes)
+        ax.barh(y - 0.015, bar_w * conf, height=0.025, left=bar_x,
+                color=_ACCENT_GREEN if conf > 0.7 else _ACCENT_YELLOW if conf > 0.5 else _ACCENT_RED,
+                alpha=0.7, transform=ax.transAxes)
+        ax.text(bar_x + bar_w + 0.02, y, f'{conf:.0%}', fontsize=8,
+                color=_TEXT_COLOR, transform=ax.transAxes, va='top')
+        ax.text(0.78, y, f"{d.get('source', '')} ({d.get('policy', '')})",
+                fontsize=7, color=_TEXT_COLOR, alpha=0.5, transform=ax.transAxes, va='top')
+    return _fig_to_bytes(fig)
