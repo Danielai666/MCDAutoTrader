@@ -1513,6 +1513,76 @@ async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
+async def golive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Go Live Wizard: enforces prerequisites before enabling live trading.
+    Checks: /liveready passes, paper mode completed, risk settings set,
+    API key reminder (no-withdrawal), applies micro-risk safety profile."""
+    uid = update.effective_user.id
+    from user_context import UserContext
+    from reconcile import check_live_readiness
+    from storage import get_user_settings, upsert_user_settings, get_credential
+
+    ctx = UserContext.load(uid)
+    issues = []
+
+    # 1. Live readiness
+    readiness = check_live_readiness()
+    if not readiness['ready']:
+        issues.append("FAIL: /liveready check did not pass. Fix issues first.")
+
+    # 2. Paper mode history (must have at least 5 closed paper trades)
+    from storage import fetchone
+    row = fetchone("SELECT COUNT(*) FROM trades WHERE user_id=? AND status='CLOSED'", (uid,))
+    closed_count = int(row[0]) if row else 0
+    if closed_count < 5:
+        issues.append(f"FAIL: Need at least 5 closed paper trades (you have {closed_count}).")
+
+    # 3. Exchange credentials
+    cred = get_credential(uid, 'ccxt')
+    if not cred:
+        issues.append("FAIL: No exchange connected. Use Connect Exchange first.")
+
+    # 4. Risk settings must be explicitly set
+    settings = get_user_settings(uid) or {}
+    if not settings:
+        issues.append("FAIL: No user settings found. Configure risk settings first.")
+
+    if issues:
+        lines = ["Go-Live Wizard: NOT READY\n"] + issues
+        lines.append("\nFix the above issues and run /golive again.")
+        await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+        return
+
+    # All prerequisites passed — apply micro-risk safety profile
+    upsert_user_settings(uid,
+        mode='live',
+        ai_mode='manual_confirm',  # Force manual confirm for first live run
+    )
+    # Apply micro-risk if user hasn't set stricter limits
+    from storage import execute
+    execute("UPDATE users SET risk_per_trade=MIN(risk_per_trade, 0.0025), "
+            "max_open_trades=MIN(max_open_trades, 1) WHERE user_id=?", (uid,))
+
+    lines = [
+        "Go-Live Wizard: READY",
+        "",
+        "Safety profile applied:",
+        "  Mode: LIVE",
+        "  AI Mode: manual_confirm (you approve each trade)",
+        "  Risk per trade: max 0.25%",
+        "  Max open trades: 1",
+        "",
+        "IMPORTANT REMINDERS:",
+        "  - Use a NO-WITHDRAWAL API key (read + trade only)",
+        "  - /panic_stop is your emergency brake",
+        "  - Monitor /health_stats and /reconcile daily",
+        "  - Start with minimum capital",
+        "",
+        "You can now trade live. Be careful.",
+    ]
+    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+
+
 async def health_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show health telemetry counters."""
     uid = update.effective_user.id
@@ -1863,6 +1933,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
     app.add_handler(CommandHandler("backtest", rate_limited(backtest_cmd)))
     app.add_handler(CommandHandler("health_stats", rate_limited(health_stats_cmd)))
+    app.add_handler(CommandHandler("golive", rate_limited(golive_cmd)))
     app.add_handler(CommandHandler("visuals", rate_limited(visual_settings_cmd)))
 
     # --- Screenshot analysis ---
