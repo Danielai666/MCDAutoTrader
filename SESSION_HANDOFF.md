@@ -4,9 +4,10 @@
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Repository: `MCDAutoTrader`
 > Date: 2026-04-13
-> Total: 39 Python files, 10,632 lines of code (including 748 lines of tests)
+> Total: 40 Python files, 11,238 lines of code (including 748 lines of tests)
 > Tests: 66 automated tests, all passing
-> Latest commit: `a65fe33`
+> Release: v1.0-rc1 (feature freeze — Go-Live Trust Mode)
+> Latest commit: `0c3c256`
 
 ---
 
