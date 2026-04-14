@@ -3,8 +3,8 @@
 
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Date: 2026-04-13
-> Total: 30 Python files, ~7,733 lines of code
-> Latest commit: `0d3d704` (Visual reporting layer)
+> Total: 30 Python files, ~7,943 lines of code
+> Latest commit: `19fa95f` (Idempotency, mode gating, locks, panic_stop)
 
 ---
 
@@ -305,26 +305,33 @@ psycopg2-binary, cryptography, pytz, matplotlib
 | `5e3b427` | Multi-tenant Phase 5-7: per-user scheduler, guards, commands |
 | `e954fb6` | Spec A.1-A.5: credentials table, envelope encryption, provider interface, Ichimoku |
 | `0d3d704` | Visual reporting layer: signal cards, market overview, daily report |
+| `19fa95f` | Idempotency, mode gating, per-user locks, panic_stop, rate limiter |
 
 ---
 
 ## 13. What's Complete
 
-- Multi-tenant data model + schema migrations
-- Envelope encryption for exchange API keys
+- Multi-tenant data model + schema migrations (12 tables)
+- Envelope encryption (AEAD V2) for exchange API keys
 - ITradingProvider interface + CCXT + Paper providers
-- Per-user risk engine (all 10 gates)
-- Two-phase trade execution with crash recovery
-- Per-user scheduler (shared analysis + isolated execution)
+- Per-user risk engine (all 10 gates with user_id/ctx)
+- Two-phase trade execution with crash recovery + operation_id idempotency
+- Per-user scheduler (shared analysis + isolated execution + asyncio locks)
 - Per-user guard checks (SL/TP/ATR trailing)
 - Exchange reconciliation + live-readiness check
 - Visual PNG report cards (signal, market overview, daily)
-- Ichimoku indicator + strategy integration
-- Credentials table with encryption versioning
+- Ichimoku indicator + strategy integration (12 scoring components)
+- Credentials table with envelope encryption versioning
 - User settings table (mode/ai_mode/timezone/panic_stop)
-- Operation log for idempotency
-- Structured logging with redaction
-- 35+ Telegram commands with inline keyboards
+- Mode system: signal_only/paper/live + ai_mode: signal_only/manual_confirm/ai_full
+- /panic_stop command (per-user emergency stop)
+- Rate limiter (10 commands/min/user)
+- Per-trade close report helper (format_trade_close_report)
+- Manual confirm flow (sends trade candidates with Execute/Skip buttons)
+- Operation log for idempotency (prevent duplicate trades across restarts)
+- Per-user asyncio locks (prevent concurrent execution for same user)
+- Structured logging with secret redaction
+- 37+ Telegram commands with inline keyboards
 - PostgreSQL + SQLite dual support
 - Railway deployment ready
 
@@ -333,11 +340,9 @@ psycopg2-binary, cryptography, pytz, matplotlib
 ## 14. What Remains To Build
 
 ### High Priority (Spec Phase A remaining)
-- **A.4: Telegram state machine** — full connect exchange flow (select exchange → enter key → enter secret → validate → save). Currently /setkeys exists but the guided flow with inline keyboards is not built.
-- **A.6: Wire operation_id** — the operation_log table and helpers exist but execute_autonomous_trade doesn't use them yet. Per-user asyncio locks in scheduler not wired.
-- **A.7: Per-trade close reports** — format_trade_close_report() needs to be called after each close and sent via Telegram. Timezone-aware daily reports (hourly check, send at user's local 20:00).
-- **Rate limiter** — logic designed but not wired into command handlers.
-- **Mode system wiring** — user_settings.mode/ai_mode fields exist but scheduler doesn't fully gate on them yet (signal_only should skip execution, manual_confirm should show confirm/reject buttons).
+- **A.4: Connect exchange state machine** — guided Telegram flow (select exchange → enter key → enter secret → validate → save) with inline keyboards. Currently /setkeys works but the guided UX flow is not built.
+- **A.7: Wire per-trade close report sending** — format_trade_close_report() exists but needs to be called after each close_trade() and sent to the user via Telegram.
+- **A.7: Timezone-aware daily reports** — send at each user's local 20:00 instead of fixed interval.
 
 ### Spec Phase B
 - Screenshot analysis (batch up to 12 images, AI vision analysis)
