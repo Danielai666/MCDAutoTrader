@@ -49,6 +49,52 @@ def _check_rate_limit(uid: int, limit: int = 10, window: int = 60) -> bool:
     return True
 
 # ---------------------------
+# Connect exchange state machine
+# ---------------------------
+from dataclasses import dataclass, field as dc_field
+from enum import Enum
+
+class ConnectState(Enum):
+    IDLE = "idle"
+    SELECT_EXCHANGE = "select_exchange"
+    ENTER_KEY = "enter_key"
+    ENTER_SECRET = "enter_secret"
+    VALIDATING = "validating"
+
+@dataclass
+class ConnectSession:
+    state: ConnectState = ConnectState.IDLE
+    exchange_id: str = ''
+    api_key: str = ''
+    api_secret: str = ''
+    started_ts: float = 0.0
+    msgs_to_delete: list = dc_field(default_factory=list)
+
+_connect_sessions: dict = {}  # uid -> ConnectSession
+_CONNECT_TTL = 300  # 5 minutes
+
+SUPPORTED_EXCHANGES = [
+    'kraken', 'binance', 'bybit', 'coinbasepro', 'kucoin',
+    'okx', 'bitfinex', 'gate', 'mexc', 'htx',
+]
+
+def _get_connect_session(uid: int) -> ConnectSession:
+    s = _connect_sessions.get(uid)
+    if s and (time.time() - s.started_ts) > _CONNECT_TTL:
+        _connect_sessions.pop(uid, None)
+        return None
+    return s
+
+def _connect_exchange_keyboard():
+    rows = []
+    for i in range(0, len(SUPPORTED_EXCHANGES), 2):
+        row = [InlineKeyboardButton(ex.upper(), callback_data=f"conn_ex_{ex}")
+               for ex in SUPPORTED_EXCHANGES[i:i+2]]
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Cancel", callback_data="conn_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+# ---------------------------
 # Inline Keyboard Menus
 # ---------------------------
 def main_menu_keyboard():
@@ -67,6 +113,8 @@ def main_menu_keyboard():
         [InlineKeyboardButton("❌ Cancel Guards ➤", callback_data="menu_cancel")],
         [InlineKeyboardButton("📊 Report ➤", callback_data="menu_reporting"),
          InlineKeyboardButton("🌐 Pairs ➤", callback_data="menu_pairs")],
+        [InlineKeyboardButton("🔗 Connect Exchange", callback_data="cmd_connect"),
+         InlineKeyboardButton("🔌 Disconnect", callback_data="cmd_disconnect")],
         [InlineKeyboardButton("🔧 Admin ➤", callback_data="menu_admin")],
     ])
 
@@ -834,6 +882,86 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
 
+    # --- Manual confirm trade execution ---
+    elif data.startswith("confirm_trade_"):
+        # Format: confirm_trade_{PAIR}_{SIDE}
+        parts = data.replace("confirm_trade_", "").rsplit("_", 1)
+        if len(parts) == 2:
+            c_pair, c_side = parts[0], parts[1]
+            await query.edit_message_text(f"Executing {c_side} {c_pair}...")
+            try:
+                from user_context import UserContext
+                from scheduler import _compute_signals
+                from risk import atr_stop_loss, atr_take_profit, can_enter_enhanced, confidence_scaled_position_size, portfolio_exposure_check
+                from exchange import market_price
+                from trade_executor import execute_autonomous_trade
+
+                ctx = UserContext.load(uid)
+                features = await _compute_signals(c_pair)
+                snap = features.get('by_tf', {}).get('1h', {}).get('snapshot', {})
+                atr_val = snap.get('atr', 0)
+                px = market_price(c_pair)
+
+                if atr_val > 0 and px > 0:
+                    sl = atr_stop_loss(px, atr_val, c_side)
+                    tp = atr_take_profit(px, atr_val, c_side)
+                    allowed, reason = can_enter_enhanced(c_pair, c_side, ctx=ctx)
+                    if allowed:
+                        _, _, remaining = portfolio_exposure_check(ctx)
+                        qty = confidence_scaled_position_size(px, atr_val, 0.7, 0.5, remaining, ctx=ctx)
+                        if qty > 0:
+                            result = execute_autonomous_trade(c_pair, c_side, qty, px, sl, tp,
+                                                              reason="MANUAL_CONFIRM", ctx=ctx)
+                            if result['success']:
+                                await app.bot.send_message(chat_id=chat_id,
+                                    text=f"Executed: {c_side} {qty:.6f} {c_pair} @ ${px:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}",
+                                    reply_markup=back_keyboard())
+                            else:
+                                await app.bot.send_message(chat_id=chat_id,
+                                    text=f"Execution failed: {result.get('error', 'unknown')}", reply_markup=back_keyboard())
+                        else:
+                            await app.bot.send_message(chat_id=chat_id, text="Position size = 0, skipped.", reply_markup=back_keyboard())
+                    else:
+                        await app.bot.send_message(chat_id=chat_id, text=f"Blocked: {reason}", reply_markup=back_keyboard())
+                else:
+                    await app.bot.send_message(chat_id=chat_id, text="Cannot execute: missing price/ATR data.", reply_markup=back_keyboard())
+            except Exception as e:
+                await app.bot.send_message(chat_id=chat_id, text=f"Error: {e}", reply_markup=back_keyboard())
+
+    elif data == "confirm_skip":
+        await query.edit_message_text("Trade skipped.", reply_markup=back_keyboard())
+
+    # --- Connect Exchange flow ---
+    elif data == "cmd_connect":
+        session = ConnectSession(state=ConnectState.SELECT_EXCHANGE, started_ts=time.time())
+        _connect_sessions[uid] = session
+        await query.edit_message_text("Select your exchange:", reply_markup=_connect_exchange_keyboard())
+
+    elif data.startswith("conn_ex_"):
+        ex_id = data.replace("conn_ex_", "")
+        session = _get_connect_session(uid)
+        if not session:
+            session = ConnectSession(started_ts=time.time())
+            _connect_sessions[uid] = session
+        session.state = ConnectState.ENTER_KEY
+        session.exchange_id = ex_id
+        PENDING_INPUT[uid] = {"type": "connect_key", "chat_id": chat_id}
+        await query.edit_message_text(f"Exchange: {ex_id.upper()}\n\nSend your API Key now.\n(Message will be deleted)")
+
+    elif data == "conn_cancel":
+        _connect_sessions.pop(uid, None)
+        PENDING_INPUT.pop(uid, None)
+        await query.edit_message_text("Connect cancelled.", reply_markup=back_keyboard())
+
+    elif data == "cmd_disconnect":
+        from storage import get_credential, delete_credential
+        cred = get_credential(uid, 'ccxt')
+        if cred:
+            delete_credential(uid, 'ccxt', cred['exchange_id'])
+            await query.edit_message_text(f"Disconnected from {cred['exchange_id'].upper()}.", reply_markup=back_keyboard())
+        else:
+            await query.edit_message_text("No exchange connected.", reply_markup=back_keyboard())
+
 # ---------------------------
 # Text handler for pending input (SL/TP/Trail values)
 # ---------------------------
@@ -845,6 +973,84 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     pending = PENDING_INPUT.pop(uid)
     txt = update.message.text.strip()
     ptype = pending["type"]
+
+    # --- Connect exchange flow: key and secret input ---
+    if ptype == "connect_key":
+        # Delete the message containing the API key immediately
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        session = _get_connect_session(uid)
+        if not session:
+            await update.effective_chat.send_message("Session expired. Start over with Connect Exchange.", reply_markup=back_keyboard())
+            return
+        session.api_key = txt
+        session.state = ConnectState.ENTER_SECRET
+        PENDING_INPUT[uid] = {"type": "connect_secret", "chat_id": pending["chat_id"]}
+        await update.effective_chat.send_message("API Key received (deleted).\n\nNow send your API Secret.\n(Message will be deleted)")
+        return
+
+    if ptype == "connect_secret":
+        # Delete the message containing the secret immediately
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        session = _get_connect_session(uid)
+        if not session or not session.api_key:
+            await update.effective_chat.send_message("Session expired. Start over.", reply_markup=back_keyboard())
+            return
+        session.api_secret = txt
+        session.state = ConnectState.VALIDATING
+
+        await update.effective_chat.send_message(f"Validating credentials on {session.exchange_id.upper()}...")
+
+        # Validate credentials
+        try:
+            from ccxt_provider import CCXTProvider
+            provider = CCXTProvider(session.exchange_id, session.api_key, session.api_secret)
+            ok, msg = provider.validate_credentials()
+
+            if ok:
+                # Encrypt and save
+                from crypto_utils import encrypt_exchange_keys, is_encryption_configured
+                if is_encryption_configured():
+                    enc = encrypt_exchange_keys(session.api_key, session.api_secret)
+                    from storage import save_credential
+                    save_credential(uid, 'ccxt', session.exchange_id,
+                                    enc['api_key_enc'], enc['api_secret_enc'],
+                                    enc.get('data_key_enc', ''), enc.get('encryption_version', 2))
+                    await update.effective_chat.send_message(
+                        f"Connected to {session.exchange_id.upper()}.\n"
+                        f"Credentials encrypted and saved.\n"
+                        f"Use /myaccount to verify.",
+                        reply_markup=back_keyboard())
+                else:
+                    # Fallback: save with V1 encryption
+                    from crypto_utils import encrypt_credential
+                    from storage import save_credential
+                    key_enc = encrypt_credential(session.api_key)
+                    secret_enc = encrypt_credential(session.api_secret)
+                    save_credential(uid, 'ccxt', session.exchange_id,
+                                    key_enc, secret_enc, '', 1)
+                    await update.effective_chat.send_message(
+                        f"Connected to {session.exchange_id.upper()} (V1 encryption).",
+                        reply_markup=back_keyboard())
+            else:
+                await update.effective_chat.send_message(
+                    f"Validation failed: {msg}\nPlease try again.",
+                    reply_markup=back_keyboard())
+        except Exception as e:
+            log.error("Connect exchange failed for user %d: %s", uid, e)
+            await update.effective_chat.send_message(
+                f"Connection error: {e}", reply_markup=back_keyboard())
+        finally:
+            # Clear session data (secrets in memory)
+            session.api_key = ''
+            session.api_secret = ''
+            _connect_sessions.pop(uid, None)
+        return
 
     # Non-numeric inputs
     if ptype in ("addpair", "rmpair"):
