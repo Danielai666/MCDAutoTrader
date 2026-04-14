@@ -3,8 +3,8 @@
 
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Date: 2026-04-13
-> Total: 31 Python files, ~8,494 lines of code
-> Latest commit: `7e46ce9` (Fundamental gate — news/event risk filter)
+> Total: 34 Python files, ~9,528 lines of code
+> Latest commit: `d033030` (Screenshot batch analysis)
 
 ---
 
