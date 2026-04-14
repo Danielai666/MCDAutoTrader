@@ -145,6 +145,23 @@ CREATE TABLE IF NOT EXISTS operation_log(
     result_json TEXT,
     created_ts INTEGER
 );
+CREATE TABLE IF NOT EXISTS mt5_connections(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bridge_token_id TEXT NOT NULL,
+    bridge_secret_enc TEXT NOT NULL,
+    broker_label TEXT DEFAULT '',
+    symbol_map_json TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_ts INTEGER,
+    last_seen_ts INTEGER,
+    UNIQUE(user_id, bridge_token_id)
+);
+CREATE TABLE IF NOT EXISTS mt5_nonces(
+    nonce TEXT PRIMARY KEY,
+    user_id INTEGER,
+    created_ts INTEGER
+);
 '''
 
 # -------------------------------------------------------------------
@@ -251,6 +268,25 @@ CREATE TABLE IF NOT EXISTS operation_log(
     pair TEXT,
     side TEXT,
     result_json TEXT,
+    created_ts BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS mt5_connections(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    bridge_token_id TEXT NOT NULL,
+    bridge_secret_enc TEXT NOT NULL,
+    broker_label TEXT DEFAULT '',
+    symbol_map_json TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_ts BIGINT,
+    last_seen_ts BIGINT,
+    UNIQUE(user_id, bridge_token_id)
+);
+
+CREATE TABLE IF NOT EXISTS mt5_nonces(
+    nonce TEXT PRIMARY KEY,
+    user_id BIGINT,
     created_ts BIGINT
 );
 '''

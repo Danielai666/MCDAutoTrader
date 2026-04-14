@@ -40,6 +40,8 @@ class Settings:
     FEATURE_HIDDEN_DIVERGENCE: bool = _bool('FEATURE_HIDDEN_DIVERGENCE')
     FEATURE_MARKET_REGIME: bool = _bool('FEATURE_MARKET_REGIME')
     FEATURE_ICHIMOKU: bool = _bool('FEATURE_ICHIMOKU', 'true')
+    FEATURE_MT5_BRIDGE: bool = _bool('FEATURE_MT5_BRIDGE')
+    FEATURE_SCREENSHOTS: bool = _bool('FEATURE_SCREENSHOTS')
 
     # --- Market / Exchange ---
     EXCHANGE: str = os.getenv('EXCHANGE', 'kraken')
@@ -155,5 +157,15 @@ class Settings:
 
     # --- Credential encryption (for multi-user exchange key storage) ---
     CREDENTIAL_ENCRYPTION_KEY: str = os.getenv('CREDENTIAL_ENCRYPTION_KEY', '')
+
+    # --- MT5 EA Bridge ---
+    MT5_BRIDGE_HOST: str = os.getenv('MT5_BRIDGE_HOST', '0.0.0.0')
+    MT5_BRIDGE_PORT: int = int(os.getenv('MT5_BRIDGE_PORT', '8080'))
+    MT5_REPLAY_WINDOW_SECONDS: int = int(os.getenv('MT5_REPLAY_WINDOW_SECONDS', '30'))
+    MT5_MAX_SPREAD_PIPS: float = float(os.getenv('MT5_MAX_SPREAD_PIPS', '5.0'))
+
+    # --- Screenshot analysis ---
+    SCREENSHOT_MAX_IMAGES: int = int(os.getenv('SCREENSHOT_MAX_IMAGES', '12'))
+    SCREENSHOT_VISION_MODEL: str = os.getenv('SCREENSHOT_VISION_MODEL', 'claude-sonnet-4-20250514')
 
 SETTINGS = Settings()
