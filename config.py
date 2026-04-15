@@ -43,6 +43,8 @@ class Settings:
     FEATURE_MT5_BRIDGE: bool = _bool('FEATURE_MT5_BRIDGE')
     FEATURE_SCREENSHOTS: bool = _bool('FEATURE_SCREENSHOTS')
     FEATURE_CONTROL_PANEL: bool = _bool('FEATURE_CONTROL_PANEL', 'true')
+    FEATURE_TRIAL_MODE: bool = _bool('FEATURE_TRIAL_MODE', 'true')
+    FEATURE_I18N: bool = _bool('FEATURE_I18N', 'true')
 
     # --- Market / Exchange ---
     EXCHANGE: str = os.getenv('EXCHANGE', 'kraken')

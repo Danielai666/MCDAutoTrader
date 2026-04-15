@@ -305,24 +305,31 @@ def _active_pairs(uid: int) -> list:
         return []
 
 
+def _tr(uid: int, key: str, fallback: str) -> str:
+    """Best-effort translation — never raises, falls back to English fallback."""
+    try:
+        from i18n import t as _t
+        return _t(uid, key) or fallback
+    except Exception:
+        return fallback
+
+
 def _system_status(uid: int) -> str:
     """Three-state health indicator. Per-user runtime state takes precedence,
     then global kill-switch / dry-run flags, else Healthy."""
-    # Runtime state set by button_callback pre/post hooks
     state = _user_state.get(uid, "healthy")
     if state == "busy":
-        return "🟡 System: Busy"
+        return _tr(uid, "panel_system_busy", "🟡 System: Busy")
     if state == "error":
-        return "🔴 System: Error"
-    # Global flags override Healthy
+        return _tr(uid, "panel_system_error", "🔴 System: Error")
     try:
         if getattr(SETTINGS, "KILL_SWITCH", False):
-            return "🔴 System: Kill Switch"
+            return _tr(uid, "panel_system_killswitch", "🔴 System: Kill Switch")
         if getattr(SETTINGS, "DRY_RUN_MODE", False):
-            return "🟡 System: Dry Run"
+            return _tr(uid, "panel_system_dryrun", "🟡 System: Dry Run")
     except Exception:
         pass
-    return "🟢 System: Healthy"
+    return _tr(uid, "panel_system_healthy", "🟢 System: Healthy")
 
 
 def _signal_glyph(direction: str) -> str:
@@ -353,7 +360,9 @@ def _open_trades_count(uid: int) -> int:
 def build_panel_text(uid: int) -> str:
     user = _load_user_row(uid)
     mode = user.get("mode", "PAPER")
-    autotrade = "ON" if user.get("autotrade") else "OFF"
+    autotrade_on = bool(user.get("autotrade"))
+    autotrade_label = _tr(uid, "autotrade_on" if autotrade_on else "autotrade_off",
+                          "ON" if autotrade_on else "OFF")
 
     pairs = _active_pairs(uid)
     pairs_str = ", ".join(p.split("/")[0] for p in pairs[:5]) if pairs else "—"
@@ -379,18 +388,37 @@ def build_panel_text(uid: int) -> str:
             act_age_str = f"{act_age // 60}m ago"
         else:
             act_age_str = f"{act_age // 3600}h ago"
-        last_action_line = f"Last Action: `{last_act['text']}` _({act_age_str})_"
+        last_action_line = f"{_tr(uid, 'panel_last_action', 'Last Action')}: `{last_act['text']}` _({act_age_str})_"
     else:
-        last_action_line = "Last Action: `—`"
+        last_action_line = f"{_tr(uid, 'panel_last_action', 'Last Action')}: `—`"
+
+    title = _tr(uid, "panel_title", "MCDAutoTrader Control Panel")
+    mode_lbl = _tr(uid, "panel_mode", "Mode")
+    at_lbl = _tr(uid, "panel_autotrade", "AutoTrade")
+    open_lbl = _tr(uid, "panel_open", "Open")
+    pairs_lbl = _tr(uid, "panel_pairs", "Pairs")
+    sig_lbl = _tr(uid, "panel_last_signal", "Last Signal")
+    select_lbl = _tr(uid, "panel_select_action", "Select an action:")
+
+    # Trial block (injected only when a trial is active)
+    trial_block = ""
+    try:
+        import trial as _trial
+        block = _trial.panel_block(uid)
+        if block:
+            trial_block = f"\n{block}"
+    except Exception:
+        pass
 
     return (
-        "*MCDAutoTrader Control Panel*\n"
-        f"Mode: `{mode}`   AutoTrade: `{autotrade}`   Open: `{open_n}`\n"
-        f"Pairs: `{pairs_str}`\n"
-        f"Last Signal: {last_sig}\n"
+        f"*{title}*\n"
+        f"{mode_lbl}: `{mode}`   {at_lbl}: `{autotrade_label}`   {open_lbl}: `{open_n}`\n"
+        f"{pairs_lbl}: `{pairs_str}`\n"
+        f"{sig_lbl}: {last_sig}\n"
         f"{last_action_line}\n"
-        f"{status}\n\n"
-        "Select an action:"
+        f"{status}"
+        f"{trial_block}\n\n"
+        f"{select_lbl}"
     )
 
 

@@ -376,6 +376,12 @@ def _migrate_multi_tenant(conn):
         ('max_portfolio_exposure', 'REAL DEFAULT 0.50'),
         ('capital_per_trade_pct', 'REAL DEFAULT 0.10'),
         ('ai_fusion_policy', "TEXT DEFAULT 'local_only'"),
+        # Trial Mode + i18n (UX layer only — additive, backward compatible)
+        ('language', "TEXT DEFAULT 'en'"),
+        ('trial_active', 'INTEGER DEFAULT 0'),
+        ('trial_start_ts', 'INTEGER DEFAULT 0'),
+        ('trial_capital', 'REAL DEFAULT 0'),
+        ('trial_target_days', 'INTEGER DEFAULT 14'),
     ]:
         try:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
@@ -448,6 +454,12 @@ def _init_postgres():
             ('max_portfolio_exposure', 'DOUBLE PRECISION DEFAULT 0.50'),
             ('capital_per_trade_pct', 'DOUBLE PRECISION DEFAULT 0.10'),
             ('ai_fusion_policy', "TEXT DEFAULT 'local_only'"),
+            # Trial Mode + i18n (UX layer only — additive, backward compatible)
+            ('language', "TEXT DEFAULT 'en'"),
+            ('trial_active', 'INTEGER DEFAULT 0'),
+            ('trial_start_ts', 'BIGINT DEFAULT 0'),
+            ('trial_capital', 'DOUBLE PRECISION DEFAULT 0'),
+            ('trial_target_days', 'INTEGER DEFAULT 14'),
         ]:
             migration_stmts.append(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typedef}")
         # Indexes

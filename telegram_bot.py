@@ -2097,6 +2097,130 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+# ---------------------------
+# Bilingual UI + Trial Mode commands (UX layer only)
+# ---------------------------
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /lang en | /lang fa"""
+    uid = update.effective_user.id
+    try:
+        from i18n import set_user_lang, t as _t
+    except Exception:
+        await update.message.reply_text("i18n unavailable.")
+        return
+    if not context.args:
+        await update.message.reply_text(_t(uid, "lang_usage"))
+        return
+    lang = context.args[0].lower().strip()
+    if not set_user_lang(uid, lang):
+        await update.message.reply_text(_t(uid, "lang_usage"))
+        return
+    # Re-read (cache invalidated by set_user_lang)
+    key = "lang_set_fa" if lang == "fa" else "lang_set_en"
+    await update.message.reply_text(_t(uid, key))
+
+
+async def trial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trial Mode commands. /trial <subcommand> [args]"""
+    uid = update.effective_user.id
+    try:
+        from i18n import t as _t
+        import trial as _trial
+    except Exception as e:
+        log.error("trial_cmd import failed: %s", e)
+        await update.message.reply_text("Trial mode unavailable.")
+        return
+
+    if not _trial.is_enabled():
+        await update.message.reply_text("Trial Mode is disabled (FEATURE_TRIAL_MODE=false).")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(_t(uid, "trial_usage"))
+        return
+
+    sub = args[0].lower()
+
+    if sub == "start":
+        if len(args) < 2:
+            await update.message.reply_text(_t(uid, "trial_start_usage"))
+            return
+        try:
+            capital = float(args[1])
+            if capital <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(_t(uid, "trial_invalid_capital"))
+            return
+        target_days = 14
+        if len(args) >= 3:
+            try:
+                target_days = max(1, min(90, int(args[2])))
+            except ValueError:
+                pass
+        ok = _trial.start_trial(uid, capital, target_days)
+        if ok:
+            await update.message.reply_text(
+                f"{_t(uid, 'trial_started')}  "
+                f"({_t(uid, 'trial_capital')}: ${capital:,.2f}, "
+                f"{target_days} {_t(uid, 'trial_days')})",
+                reply_markup=back_keyboard(),
+            )
+        else:
+            await update.message.reply_text(_t(uid, "trial_invalid_capital"))
+        return
+
+    if sub == "status":
+        await update.message.reply_text(
+            _trial.render_status(uid), parse_mode="Markdown", reply_markup=back_keyboard()
+        )
+        return
+
+    if sub == "report":
+        await update.message.reply_text(
+            _trial.render_report(uid), parse_mode="Markdown", reply_markup=back_keyboard()
+        )
+        return
+
+    if sub == "summary":
+        await update.message.reply_text(
+            _trial.render_summary(uid), parse_mode="Markdown", reply_markup=back_keyboard()
+        )
+        return
+
+    if sub == "stop":
+        _trial.stop_trial(uid)
+        await update.message.reply_text(_t(uid, "trial_stopped"), reply_markup=back_keyboard())
+        return
+
+    if sub == "go_live":
+        if not _trial.can_go_live(uid):
+            await update.message.reply_text(_t(uid, "trial_golive_denied"), reply_markup=back_keyboard())
+            return
+        # Require explicit "confirm" suffix
+        if len(args) < 2 or args[1].lower() != "confirm":
+            await update.message.reply_text(_t(uid, "trial_golive_confirm"), reply_markup=back_keyboard())
+            return
+        ok = _trial.convert_to_live(uid)
+        if ok:
+            await update.message.reply_text(_t(uid, "trial_golive_done"), reply_markup=back_keyboard())
+            # Kick reconciliation (best effort)
+            try:
+                from reconcile import reconcile_positions, format_reconcile_report
+                report = reconcile_positions()
+                await update.effective_chat.send_message(
+                    format_reconcile_report(report), reply_markup=back_keyboard()
+                )
+            except Exception as e:
+                log.warning("Post-go_live reconcile failed: %s", e)
+        else:
+            await update.message.reply_text(_t(uid, "trial_golive_denied"), reply_markup=back_keyboard())
+        return
+
+    await update.message.reply_text(_t(uid, "trial_usage"))
+
+
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exchange reconciliation. Usage: /reconcile [fix]"""
     uid = update.effective_user.id
@@ -2263,6 +2387,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("health_stats", rate_limited(health_stats_cmd)))
     app.add_handler(CommandHandler("golive", rate_limited(golive_cmd)))
     app.add_handler(CommandHandler("visuals", rate_limited(visual_settings_cmd)))
+
+    # --- Trial Mode + bilingual UI (UX layer only) ---
+    app.add_handler(CommandHandler("trial", rate_limited(trial_cmd)))
+    app.add_handler(CommandHandler("lang", rate_limited(lang_cmd)))
 
     # --- Screenshot analysis ---
     app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))
