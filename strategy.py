@@ -203,7 +203,7 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
     # A high-strength regular divergence with candle confirmation is itself
     # a valid setup even if total score is below the 1.5 threshold.
     if direction == 'HOLD':
-        DIV_TRIGGER_STR = 0.7  # high bar — only clear divergence triggers
+        DIV_TRIGGER_STR = 0.65  # clear divergence threshold
         strong_bull_div = (md_type == 'bullish' and md_str >= DIV_TRIGGER_STR) or \
                           (rd_type == 'bullish' and rd_str >= DIV_TRIGGER_STR)
         strong_bear_div = (md_type == 'bearish' and md_str >= DIV_TRIGGER_STR) or \
