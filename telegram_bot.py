@@ -109,6 +109,19 @@ def _connect_exchange_keyboard():
 # Inline Keyboard Menus
 # ---------------------------
 def main_menu_keyboard():
+    # When the control panel is enabled we delegate to panel.build_panel_keyboard
+    # which re-lays out the same callback_data into a modern grid. This keeps
+    # every existing dispatch case in button_callback working unchanged.
+    try:
+        import panel as _panel
+        if _panel.is_enabled():
+            return _panel.build_panel_keyboard()
+    except Exception:
+        pass
+    return _legacy_main_menu_keyboard()
+
+
+def _legacy_main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Signal", callback_data="cmd_signal"),
          InlineKeyboardButton("💰 Price", callback_data="cmd_price")],
@@ -656,7 +669,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Main Menu ---
     if data == "cmd_menu":
-        await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard())
+        try:
+            import panel as _panel
+            if _panel.is_enabled():
+                await query.edit_message_text(
+                    _panel.build_panel_text(uid),
+                    reply_markup=_panel.build_panel_keyboard(),
+                    parse_mode="Markdown",
+                )
+                _panel.track_panel(uid, chat_id, query.message.message_id)
+            else:
+                await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard())
+        except Exception:
+            await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard())
 
     # --- Signal ---
     elif data == "cmd_signal":
@@ -1195,6 +1220,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # --- Persistent bottom ReplyKeyboard shortcuts ---
+    # These taps arrive as plain text messages. Route them before checking
+    # PENDING_INPUT so the shortcut works even mid-flow.
+    raw = (update.message.text or "").strip()
+    low = raw.lower()
+    if low in ("menu", "/menu"):
+        await menu_cmd(update, context)
+        return
+    if low in ("status", "/status"):
+        await status(update, context)
+        try:
+            import panel as _panel
+            if _panel.is_enabled():
+                await _panel.refresh_panel(context.application.bot, update.effective_chat.id, uid)
+        except Exception:
+            pass
+        return
+    if low in ("panic stop", "panic", "/panic_stop"):
+        await panic_stop_cmd(update, context)
+        return
+
     if uid not in PENDING_INPUT:
         return  # not waiting for input, ignore
 
@@ -1330,6 +1377,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or ""
     upsert_user(uid, uname, int(time.time()))
+    try:
+        import panel as _panel
+        if _panel.is_enabled():
+            # 1. Send the persistent bottom ReplyKeyboard (Menu / Status / Panic Stop).
+            await update.message.reply_text(
+                "👋 Welcome to MCDAutoTrader!",
+                reply_markup=_panel.bottom_reply_keyboard(),
+            )
+            # 2. Send the inline control panel and track its message_id.
+            msg = await update.message.reply_text(
+                _panel.build_panel_text(uid),
+                reply_markup=_panel.build_panel_keyboard(),
+                parse_mode="Markdown",
+            )
+            _panel.track_panel(uid, update.effective_chat.id, msg.message_id)
+            return
+    except Exception as e:
+        log.debug("panel start path failed, falling back: %s", e)
     await update.message.reply_text(
         "👋 Welcome to MCDAutoTrader!\n\n"
         "Tap the menu below to get started:",
@@ -1337,6 +1402,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        import panel as _panel
+        if _panel.is_enabled():
+            msg = await update.message.reply_text(
+                _panel.build_panel_text(uid),
+                reply_markup=_panel.build_panel_keyboard(),
+                parse_mode="Markdown",
+            )
+            _panel.track_panel(uid, update.effective_chat.id, msg.message_id)
+            return
+    except Exception as e:
+        log.debug("panel menu_cmd failed, falling back: %s", e)
     await update.message.reply_text("📋 Main Menu", reply_markup=main_menu_keyboard())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1972,6 +2050,14 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"Analysis failed: {e}", reply_markup=back_keyboard())
     finally:
         end_session(uid)
+        # After the (possibly multi-chunk) analysis output, surface the
+        # control panel again so the user has one-tap access below it.
+        try:
+            import panel as _panel
+            if _panel.is_enabled():
+                await _panel.refresh_panel(context.application.bot, update.effective_chat.id, uid)
+        except Exception:
+            pass
 
 
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
