@@ -112,6 +112,45 @@ TEXT = {
         "go_live": "Go Live",
         "go_live_btn": "🚀 Go Live",
 
+        # --- Inline panel button labels (emoji preserved, short for grid fit) ---
+        "btn_signal": "📊 Signal",
+        "btn_status": "📈 Status",
+        "btn_positions": "💼 Positions",
+        "btn_risk": "⚙️ Risk",
+        "btn_ai_card": "🤖 AI Card",
+        "btn_report": "📉 Report",
+        "btn_autotrade": "🔁 AutoTrade",
+        "btn_mode": "🧪 Mode",
+        "btn_connect": "🔌 Connect",
+        "btn_backtest": "📊 Backtest",
+        "btn_analyze": "🔍 Analyze",
+        "btn_insights": "🧠 Insights",
+        "btn_guards": "🛡 Guards",
+        "btn_risk_board": "⚠️ Risk Board",
+        "btn_heatmap": "🔥 Heatmap",
+        "btn_panic": "🚨 PANIC",
+        "btn_account": "👤 Account",
+        "btn_admin": "🧩 Admin",
+        "btn_price": "💰 Price",
+        "btn_health": "💚 Health",
+        "btn_go_live": "🚀 Go Live",
+        "btn_visuals": "🎨 Visuals",
+        "btn_pairs": "🌐 Pairs",
+        "btn_check": "🔍 Check",
+        "btn_sell_now": "🛑 Sell Now",
+        "btn_sltp_trail": "📐 SL/TP/Trail",
+        "btn_cancel": "❌ Cancel",
+        "btn_disconnect": "🔌 Disconnect",
+
+        # --- Bottom ReplyKeyboard (persistent row above text input) ---
+        "rk_menu": "Menu",
+        "rk_status": "Status",
+        "rk_panic": "Panic Stop",
+
+        # --- /langtest ---
+        "langtest_current": "Current language",
+        "langtest_sample": "Sample",
+
         # --- Generic ---
         "days_ago": "ago",
         "hours_ago": "ago",
@@ -196,6 +235,45 @@ TEXT = {
         "trial_stopped": "دوره آزمایشی متوقف شد.",
         "go_live": "ورود به حالت واقعی",
         "go_live_btn": "🚀 واقعی",
+
+        # --- Inline panel button labels (Farsi, kept short for grid fit) ---
+        "btn_signal": "📊 سیگنال",
+        "btn_status": "📈 وضعیت",
+        "btn_positions": "💼 پوزیشن‌ها",
+        "btn_risk": "⚙️ ریسک",
+        "btn_ai_card": "🤖 کارت AI",
+        "btn_report": "📉 گزارش",
+        "btn_autotrade": "🔁 خودکار",
+        "btn_mode": "🧪 حالت",
+        "btn_connect": "🔌 اتصال",
+        "btn_backtest": "📊 بک‌تست",
+        "btn_analyze": "🔍 تحلیل",
+        "btn_insights": "🧠 بینش",
+        "btn_guards": "🛡 گاردها",
+        "btn_risk_board": "⚠️ برد ریسک",
+        "btn_heatmap": "🔥 هیت‌مپ",
+        "btn_panic": "🚨 توقف",
+        "btn_account": "👤 حساب",
+        "btn_admin": "🧩 ادمین",
+        "btn_price": "💰 قیمت",
+        "btn_health": "💚 سلامت",
+        "btn_go_live": "🚀 واقعی",
+        "btn_visuals": "🎨 نمودار",
+        "btn_pairs": "🌐 جفت‌ها",
+        "btn_check": "🔍 بررسی",
+        "btn_sell_now": "🛑 فروش",
+        "btn_sltp_trail": "📐 SL/TP/تریل",
+        "btn_cancel": "❌ لغو",
+        "btn_disconnect": "🔌 قطع",
+
+        # --- Bottom ReplyKeyboard ---
+        "rk_menu": "منو",
+        "rk_status": "وضعیت",
+        "rk_panic": "توقف",
+
+        # --- /langtest ---
+        "langtest_current": "زبان فعلی",
+        "langtest_sample": "نمونه",
 
         # --- Generic ---
         "days_ago": "قبل",

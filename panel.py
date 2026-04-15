@@ -187,81 +187,92 @@ def track_last_signal(uid: int, direction: str, score: float = 0.0, conf: float 
 # -------------------------------------------------------------------
 # Keyboard layout (reorganized grid — SAME callback_data values as before)
 # -------------------------------------------------------------------
-def build_panel_keyboard() -> InlineKeyboardMarkup:
+def _btn(uid: Optional[int], key: str, fallback: str) -> str:
+    """Translate a button label via i18n, safe on any failure."""
+    try:
+        from i18n import t as _t
+        if uid is None:
+            return _t(None, key) or fallback
+        return _t(uid, key) or fallback
+    except Exception:
+        return fallback
+
+
+def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """
-    Modern grid layout.
+    Modern grid layout, localized.
     Every callback_data MUST match an existing button_callback dispatch case.
-    Extra buttons that existed in the old menu are placed in rows 7-10 so
-    nothing is removed.
+    When `uid` is None, falls back to English (safe default for callers without
+    a user context such as help text or error surfaces).
     """
     rows = [
         # Row 1 — Core read-outs
         [
-            InlineKeyboardButton("📊 Signal", callback_data="cmd_signal"),
-            InlineKeyboardButton("📈 Status", callback_data="cmd_status"),
-            InlineKeyboardButton("💼 Positions", callback_data="cmd_positions_card"),
+            InlineKeyboardButton(_btn(uid, "btn_signal", "📊 Signal"), callback_data="cmd_signal"),
+            InlineKeyboardButton(_btn(uid, "btn_status", "📈 Status"), callback_data="cmd_status"),
+            InlineKeyboardButton(_btn(uid, "btn_positions", "💼 Positions"), callback_data="cmd_positions_card"),
         ],
         # Row 2 — Risk / AI / Report
         [
-            InlineKeyboardButton("⚙️ Risk", callback_data="menu_risk"),
-            InlineKeyboardButton("🤖 AI Card", callback_data="cmd_ai_card"),
-            InlineKeyboardButton("📉 Report", callback_data="menu_reporting"),
+            InlineKeyboardButton(_btn(uid, "btn_risk", "⚙️ Risk"), callback_data="menu_risk"),
+            InlineKeyboardButton(_btn(uid, "btn_ai_card", "🤖 AI Card"), callback_data="cmd_ai_card"),
+            InlineKeyboardButton(_btn(uid, "btn_report", "📉 Report"), callback_data="menu_reporting"),
         ],
         # Row 3 — Trading controls
         [
-            InlineKeyboardButton("🔁 AutoTrade", callback_data="menu_autotrade"),
-            InlineKeyboardButton("🧪 Mode", callback_data="menu_mode"),
-            InlineKeyboardButton("🔌 Connect", callback_data="cmd_connect"),
+            InlineKeyboardButton(_btn(uid, "btn_autotrade", "🔁 AutoTrade"), callback_data="menu_autotrade"),
+            InlineKeyboardButton(_btn(uid, "btn_mode", "🧪 Mode"), callback_data="menu_mode"),
+            InlineKeyboardButton(_btn(uid, "btn_connect", "🔌 Connect"), callback_data="cmd_connect"),
         ],
         # Row 4 — Analysis tools
         [
-            InlineKeyboardButton("📊 Backtest", callback_data="cmd_backtest"),
-            InlineKeyboardButton("🔍 Analyze", callback_data="cmd_analyze_screens"),
-            InlineKeyboardButton("🧠 Insights", callback_data="cmd_ai"),
+            InlineKeyboardButton(_btn(uid, "btn_backtest", "📊 Backtest"), callback_data="cmd_backtest"),
+            InlineKeyboardButton(_btn(uid, "btn_analyze", "🔍 Analyze"), callback_data="cmd_analyze_screens"),
+            InlineKeyboardButton(_btn(uid, "btn_insights", "🧠 Insights"), callback_data="cmd_ai"),
         ],
         # Row 5 — Guards / board / heatmap
         [
-            InlineKeyboardButton("🛡 Guards", callback_data="cmd_guards"),
-            InlineKeyboardButton("⚠️ Risk Board", callback_data="cmd_risk_board"),
-            InlineKeyboardButton("🔥 Heatmap", callback_data="cmd_heatmap"),
+            InlineKeyboardButton(_btn(uid, "btn_guards", "🛡 Guards"), callback_data="cmd_guards"),
+            InlineKeyboardButton(_btn(uid, "btn_risk_board", "⚠️ Risk Board"), callback_data="cmd_risk_board"),
+            InlineKeyboardButton(_btn(uid, "btn_heatmap", "🔥 Heatmap"), callback_data="cmd_heatmap"),
         ],
         # Row 6 — Panic / account / admin
         [
-            InlineKeyboardButton("🚨 PANIC", callback_data="cmd_panic_stop"),
-            InlineKeyboardButton("👤 Account", callback_data="cmd_myaccount"),
-            InlineKeyboardButton("🧩 Admin", callback_data="menu_admin"),
+            InlineKeyboardButton(_btn(uid, "btn_panic", "🚨 PANIC"), callback_data="cmd_panic_stop"),
+            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="cmd_myaccount"),
+            InlineKeyboardButton(_btn(uid, "btn_admin", "🧩 Admin"), callback_data="menu_admin"),
         ],
         # Row 7 — Extras (preserved from the old menu, none removed)
         [
-            InlineKeyboardButton("💰 Price", callback_data="cmd_price"),
-            InlineKeyboardButton("💚 Health", callback_data="cmd_health_stats"),
-            InlineKeyboardButton("🚀 Go Live", callback_data="cmd_golive"),
+            InlineKeyboardButton(_btn(uid, "btn_price", "💰 Price"), callback_data="cmd_price"),
+            InlineKeyboardButton(_btn(uid, "btn_health", "💚 Health"), callback_data="cmd_health_stats"),
+            InlineKeyboardButton(_btn(uid, "btn_go_live", "🚀 Go Live"), callback_data="cmd_golive"),
         ],
         # Row 8 — Visuals / pairs / check guards
         [
-            InlineKeyboardButton("🎨 Visuals", callback_data="cmd_visuals"),
-            InlineKeyboardButton("🌐 Pairs", callback_data="menu_pairs"),
-            InlineKeyboardButton("🔍 Check", callback_data="cmd_checkguards"),
+            InlineKeyboardButton(_btn(uid, "btn_visuals", "🎨 Visuals"), callback_data="cmd_visuals"),
+            InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Pairs"), callback_data="menu_pairs"),
+            InlineKeyboardButton(_btn(uid, "btn_check", "🔍 Check"), callback_data="cmd_checkguards"),
         ],
         # Row 9 — Manual exit / guard setters / cancel
         [
-            InlineKeyboardButton("🛑 Sell Now", callback_data="cmd_sellnow"),
-            InlineKeyboardButton("📐 SL/TP/Trail", callback_data="menu_guards_set"),
-            InlineKeyboardButton("❌ Cancel", callback_data="menu_cancel"),
+            InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="cmd_sellnow"),
+            InlineKeyboardButton(_btn(uid, "btn_sltp_trail", "📐 SL/TP/Trail"), callback_data="menu_guards_set"),
+            InlineKeyboardButton(_btn(uid, "btn_cancel", "❌ Cancel"), callback_data="menu_cancel"),
         ],
         # Row 10 — Disconnect
-        [InlineKeyboardButton("🔌 Disconnect", callback_data="cmd_disconnect")],
+        [InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="cmd_disconnect")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
-def bottom_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Always-visible row above the Telegram text input."""
+def bottom_reply_keyboard(uid: Optional[int] = None) -> ReplyKeyboardMarkup:
+    """Always-visible row above the Telegram text input. Localized."""
     return ReplyKeyboardMarkup(
         [[
-            KeyboardButton("Menu"),
-            KeyboardButton("Status"),
-            KeyboardButton("Panic Stop"),
+            KeyboardButton(_btn(uid, "rk_menu", "Menu")),
+            KeyboardButton(_btn(uid, "rk_status", "Status")),
+            KeyboardButton(_btn(uid, "rk_panic", "Panic Stop")),
         ]],
         resize_keyboard=True,
         is_persistent=True,
@@ -441,7 +452,7 @@ async def refresh_panel(bot, chat_id: int, uid: int, status_line: Optional[str] 
     if status_line:
         text += f"\n\n_{status_line}_"
 
-    markup = build_panel_keyboard()
+    markup = build_panel_keyboard(uid)
     tracked = _panel_state.get(uid)
 
     # Content-hash dedupe: if nothing changed, skip the API call. This prevents

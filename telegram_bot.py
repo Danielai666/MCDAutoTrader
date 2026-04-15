@@ -108,14 +108,15 @@ def _connect_exchange_keyboard():
 # ---------------------------
 # Inline Keyboard Menus
 # ---------------------------
-def main_menu_keyboard():
+def main_menu_keyboard(uid: int = None):
     # When the control panel is enabled we delegate to panel.build_panel_keyboard
     # which re-lays out the same callback_data into a modern grid. This keeps
     # every existing dispatch case in button_callback working unchanged.
+    # uid (optional) localizes button labels; None → English fallback.
     try:
         import panel as _panel
         if _panel.is_enabled():
-            return _panel.build_panel_keyboard()
+            return _panel.build_panel_keyboard(uid)
     except Exception:
         pass
     return _legacy_main_menu_keyboard()
@@ -698,14 +699,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _panel.is_enabled():
                 await query.edit_message_text(
                     _panel.build_panel_text(uid),
-                    reply_markup=_panel.build_panel_keyboard(),
+                    reply_markup=_panel.build_panel_keyboard(uid),
                     parse_mode="Markdown",
                 )
                 _panel.track_panel(uid, chat_id, query.message.message_id)
             else:
-                await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard())
+                await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard(uid))
         except Exception:
-            await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard())
+            await query.edit_message_text("📋 Main Menu", reply_markup=main_menu_keyboard(uid))
 
     # --- Signal ---
     elif data == "cmd_signal":
@@ -1258,15 +1259,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # --- Persistent bottom ReplyKeyboard shortcuts ---
+    # --- Persistent bottom ReplyKeyboard shortcuts (EN + FA) ---
     # These taps arrive as plain text messages. Route them before checking
-    # PENDING_INPUT so the shortcut works even mid-flow.
+    # PENDING_INPUT so the shortcut works even mid-flow. Includes Farsi
+    # labels because the ReplyKeyboardMarkup is now localized per-user.
     raw = (update.message.text or "").strip()
     low = raw.lower()
-    if low in ("menu", "/menu"):
+    # Menu: EN "Menu" / "/menu"  |  FA "منو"
+    if low in ("menu", "/menu") or raw in ("منو",):
         await menu_cmd(update, context)
         return
-    if low in ("status", "/status"):
+    # Status: EN "Status" / "/status"  |  FA "وضعیت"
+    if low in ("status", "/status") or raw in ("وضعیت",):
         await status(update, context)
         try:
             import panel as _panel
@@ -1275,7 +1279,8 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             pass
         return
-    if low in ("panic stop", "panic", "/panic_stop"):
+    # Panic: EN "Panic Stop" / "panic"  |  FA "توقف" / "توقف اضطراری"
+    if low in ("panic stop", "panic", "/panic_stop") or raw in ("توقف", "توقف اضطراری"):
         await panic_stop_cmd(update, context)
         return
 
@@ -1417,15 +1422,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         import panel as _panel
         if _panel.is_enabled():
-            # 1. Send the persistent bottom ReplyKeyboard (Menu / Status / Panic Stop).
+            # 1. Send the persistent bottom ReplyKeyboard (localized).
             await update.message.reply_text(
                 "👋 Welcome to MCDAutoTrader!",
-                reply_markup=_panel.bottom_reply_keyboard(),
+                reply_markup=_panel.bottom_reply_keyboard(uid),
             )
-            # 2. Send the inline control panel and track its message_id.
+            # 2. Send the inline control panel (localized) and track its message_id.
             msg = await update.message.reply_text(
                 _panel.build_panel_text(uid),
-                reply_markup=_panel.build_panel_keyboard(),
+                reply_markup=_panel.build_panel_keyboard(uid),
                 parse_mode="Markdown",
             )
             _panel.track_panel(uid, update.effective_chat.id, msg.message_id)
@@ -1445,14 +1450,14 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _panel.is_enabled():
             msg = await update.message.reply_text(
                 _panel.build_panel_text(uid),
-                reply_markup=_panel.build_panel_keyboard(),
+                reply_markup=_panel.build_panel_keyboard(uid),
                 parse_mode="Markdown",
             )
             _panel.track_panel(uid, update.effective_chat.id, msg.message_id)
             return
     except Exception as e:
         log.debug("panel menu_cmd failed, falling back: %s", e)
-    await update.message.reply_text("📋 Main Menu", reply_markup=main_menu_keyboard())
+    await update.message.reply_text("📋 Main Menu", reply_markup=main_menu_keyboard(uid))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
@@ -2100,24 +2105,91 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------
 # Bilingual UI + Trial Mode commands (UX layer only)
 # ---------------------------
+async def _apply_lang(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str):
+    """Shared body for /lang and /farsi. Sets language + immediately
+    re-renders bottom ReplyKeyboard and control panel in the new language."""
+    uid = update.effective_user.id
+    try:
+        from i18n import set_user_lang, t as _t, is_enabled as _i18n_enabled
+    except Exception:
+        await update.message.reply_text("i18n unavailable.")
+        return
+
+    if not _i18n_enabled():
+        await update.message.reply_text(
+            "i18n is disabled (FEATURE_I18N=false). Set FEATURE_I18N=true on Railway and restart."
+        )
+        return
+
+    lang = (lang or "").lower().strip()
+    if not set_user_lang(uid, lang):
+        await update.message.reply_text(_t(uid, "lang_usage"))
+        return
+
+    # Confirmation message
+    key = "lang_set_fa" if lang == "fa" else "lang_set_en"
+    await update.message.reply_text(_t(uid, key))
+
+    # Force immediate refresh so the user sees the new language without
+    # waiting for the 45s auto-refresh tick or tapping any other button.
+    try:
+        import panel as _panel
+        if _panel.is_enabled():
+            # 1. Re-send the bottom ReplyKeyboard with new labels.
+            await update.message.reply_text(
+                _t(uid, "panel_select_action"),
+                reply_markup=_panel.bottom_reply_keyboard(uid),
+            )
+            # 2. Invalidate the panel content-hash and re-render the inline panel.
+            tracked = _panel.get_panel(uid)
+            if tracked:
+                tracked["last_rendered_hash"] = ""
+            await _panel.refresh_panel(context.application.bot, update.effective_chat.id, uid)
+    except Exception as e:
+        log.debug("lang refresh failed: %s", e)
+
+
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Usage: /lang en | /lang fa"""
     uid = update.effective_user.id
     try:
-        from i18n import set_user_lang, t as _t
+        from i18n import t as _t
     except Exception:
         await update.message.reply_text("i18n unavailable.")
         return
     if not context.args:
         await update.message.reply_text(_t(uid, "lang_usage"))
         return
-    lang = context.args[0].lower().strip()
-    if not set_user_lang(uid, lang):
-        await update.message.reply_text(_t(uid, "lang_usage"))
+    await _apply_lang(update, context, context.args[0])
+
+
+async def farsi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Alias: /farsi → same as /lang fa."""
+    await _apply_lang(update, context, "fa")
+
+
+async def langtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic: show current language + a sample translated string."""
+    uid = update.effective_user.id
+    try:
+        from i18n import get_user_lang, t as _t, is_enabled as _i18n_enabled
+    except Exception:
+        await update.message.reply_text("i18n unavailable.")
         return
-    # Re-read (cache invalidated by set_user_lang)
-    key = "lang_set_fa" if lang == "fa" else "lang_set_en"
-    await update.message.reply_text(_t(uid, key))
+
+    lang = get_user_lang(uid)
+    enabled = _i18n_enabled()
+    sample_keys = ("panel_title", "btn_signal", "btn_status", "btn_panic",
+                   "panel_mode", "panel_autotrade", "panel_system_healthy")
+    lines = [
+        f"*{_t(uid, 'langtest_current')}*: `{lang}`",
+        f"FEATURE_I18N: `{enabled}`",
+        "",
+        f"_{_t(uid, 'langtest_sample')}:_",
+    ]
+    for k in sample_keys:
+        lines.append(f"`{k}` → {_t(uid, k)}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def trial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2391,6 +2463,8 @@ def build_app() -> Application:
     # --- Trial Mode + bilingual UI (UX layer only) ---
     app.add_handler(CommandHandler("trial", rate_limited(trial_cmd)))
     app.add_handler(CommandHandler("lang", rate_limited(lang_cmd)))
+    app.add_handler(CommandHandler("farsi", rate_limited(farsi_cmd)))
+    app.add_handler(CommandHandler("langtest", rate_limited(langtest_cmd)))
 
     # --- Screenshot analysis ---
     app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))
