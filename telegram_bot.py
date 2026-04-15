@@ -655,16 +655,40 @@ PENDING_INPUT = {}
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     uid = query.from_user.id
     chat_id = query.message.chat_id
     msg_id = query.message.message_id
     app = context.application
 
+    # --- Live dashboard: native Telegram toast on button press ---
+    # query.answer(text=...) shows a brief non-blocking notification at the
+    # top of the screen. Feels responsive, no panel flicker. ~64 char limit.
+    try:
+        import panel as _panel
+        _label = _panel.label_for(data) if _panel.is_enabled() else ""
+        if _label:
+            await query.answer(text=f"⏳ {_label}...")
+        else:
+            await query.answer()
+        # Mark busy so the header renders 🟡 System: Busy during processing
+        if _panel.is_enabled():
+            _panel.set_state(uid, "busy")
+    except Exception:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+
     # Rate limit
     if not _check_rate_limit(uid):
         await query.edit_message_text("Rate limit exceeded. Try again in a moment.")
+        try:
+            import panel as _panel
+            if _panel.is_enabled():
+                _panel.set_state(uid, "healthy")
+        except Exception:
+            pass
         return
 
     # --- Main Menu ---
@@ -1214,6 +1238,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Disconnected from {cred['exchange_id'].upper()}.", reply_markup=back_keyboard())
         else:
             await query.edit_message_text("No exchange connected.", reply_markup=back_keyboard())
+
+    # --- Live dashboard finalization: clear Busy, record Last Action ---
+    # Runs after every successful dispatch (flat if/elif chain — no early
+    # returns after the rate-limit check). If an action raised, PTB's handler
+    # error plumbing surfaces it and auto_refresh_all's BUSY_TIMEOUT clears
+    # any stuck busy state within 30s.
+    try:
+        import panel as _panel
+        if _panel.is_enabled():
+            _panel.set_state(uid, "healthy")
+            _panel.set_last_action(uid, _panel.label_for(data))
+    except Exception:
+        pass
 
 # ---------------------------
 # Text handler for pending input (SL/TP/Trail values)
@@ -2249,5 +2286,21 @@ def build_app() -> Application:
         await auto_exit_task(context.application)
 
     app.job_queue.run_repeating(_guard_job, interval=SETTINGS.GUARD_CHECK_INTERVAL_SECONDS, first=15, name="auto_exit_guard")
+
+    # --- Live dashboard auto-refresh (UI layer only) ---
+    async def _panel_refresh_job(context):
+        try:
+            import panel as _panel
+            if _panel.is_enabled():
+                await _panel.auto_refresh_all(context.application.bot)
+        except Exception as _e:
+            log.debug("panel auto_refresh_all failed: %s", _e)
+
+    app.job_queue.run_repeating(
+        _panel_refresh_job,
+        interval=45,
+        first=60,
+        name="panel_auto_refresh",
+    )
 
     return app

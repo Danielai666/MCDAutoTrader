@@ -43,11 +43,17 @@ def is_enabled() -> bool:
 # -------------------------------------------------------------------
 # Per-user panel state (in memory)
 # -------------------------------------------------------------------
-# uid -> {'chat_id': int, 'message_id': int, 'updated_ts': float}
+# uid -> {'chat_id': int, 'message_id': int, 'updated_ts': float,
+#         'last_rendered_hash': str}
 _panel_state: dict = {}
 
 # uid -> {'direction': str, 'score': float, 'conf': float, 'ts': float}
 _last_signal: dict = {}
+
+# uid -> 'healthy' | 'busy' | 'error'
+_user_state: dict = {}
+# uid -> {'text': str, 'ts': float}
+_last_action: dict = {}
 
 
 def track_panel(uid: int, chat_id: int, message_id: int) -> None:
@@ -56,7 +62,108 @@ def track_panel(uid: int, chat_id: int, message_id: int) -> None:
         "chat_id": chat_id,
         "message_id": message_id,
         "updated_ts": time.time(),
+        "last_rendered_hash": "",
     }
+
+
+# -------------------------------------------------------------------
+# Live dashboard state: system status, last action, toast labels
+# -------------------------------------------------------------------
+def set_state(uid: int, state: str) -> None:
+    """Per-user system state: 'healthy' | 'busy' | 'error'."""
+    if state in ("healthy", "busy", "error"):
+        _user_state[uid] = state
+
+
+def get_state(uid: int) -> str:
+    return _user_state.get(uid, "healthy")
+
+
+def set_last_action(uid: int, text: str) -> None:
+    _last_action[uid] = {"text": text, "ts": time.time()}
+
+
+def get_last_action(uid: int) -> Optional[dict]:
+    return _last_action.get(uid)
+
+
+# Maps inline callback_data values to short, human-readable action labels.
+# Used for:
+#   - Telegram toast on button press (query.answer(text=...))
+#   - "Last Action" line in the panel header
+# Unlisted keys fall back to a generic "Working..." / "Action performed".
+CALLBACK_LABELS = {
+    "cmd_menu": "Menu",
+    "cmd_signal": "Signal fetched",
+    "cmd_price": "Price refreshed",
+    "cmd_status": "Status refreshed",
+    "cmd_settings": "Settings loaded",
+    "cmd_guards": "Guards listed",
+    "cmd_checkguards": "Guards checked",
+    "cmd_positions": "Positions loaded",
+    "cmd_positions_card": "Positions card rendered",
+    "cmd_pnl": "PnL report",
+    "cmd_trades": "Recent trades",
+    "cmd_blocked": "Blocked signals",
+    "cmd_report": "Full report",
+    "cmd_pairs": "Pairs listed",
+    "cmd_ranking": "Ranking loaded",
+    "cmd_ai": "AI status",
+    "cmd_ai_card": "AI card rendered",
+    "cmd_heatmap": "Heatmap rendered",
+    "cmd_risk_board": "Risk board rendered",
+    "cmd_backtest": "Backtest started",
+    "cmd_visuals": "Visuals rendered",
+    "cmd_myaccount": "Account loaded",
+    "cmd_health": "Health checked",
+    "cmd_health_stats": "Health stats",
+    "cmd_golive": "Go-live wizard",
+    "cmd_panic_stop": "PANIC STOP",
+    "cmd_analyze_screens": "Analyze session started",
+    "cmd_connect": "Connect exchange",
+    "cmd_disconnect": "Disconnect",
+    "cmd_killswitch": "Kill switch toggled",
+    "cmd_reconcile": "Reconcile",
+    "cmd_liveready": "Live readiness",
+    "cmd_sellnow": "Sell now",
+    "cmd_autotrade_on": "AutoTrade ON",
+    "cmd_autotrade_off": "AutoTrade OFF",
+    "cmd_mode_paper": "Mode: PAPER",
+    "cmd_mode_live": "Mode: LIVE",
+    "cmd_cancel_sl": "SL cancelled",
+    "cmd_cancel_tp": "TP cancelled",
+    "cmd_cancel_trail": "Trail cancelled",
+    "cmd_cancel_all": "Guards cancelled",
+    # Submenus (fast, but still give feedback)
+    "menu_autotrade": "AutoTrade menu",
+    "menu_mode": "Mode menu",
+    "menu_risk": "Risk menu",
+    "menu_guards_set": "Guards setup menu",
+    "menu_cancel": "Cancel menu",
+    "menu_reporting": "Reporting menu",
+    "menu_pairs": "Pairs menu",
+    "menu_admin": "Admin menu",
+    # Prompts (text-input flows)
+    "prompt_sl": "Set Stop Loss",
+    "prompt_tp": "Set Take Profit",
+    "prompt_trail": "Set Trailing %",
+    "prompt_addpair": "Add pair",
+    "prompt_rmpair": "Remove pair",
+}
+
+
+def label_for(callback_data: str) -> str:
+    """Short human label for a callback_data. Safe for unknown keys."""
+    if not callback_data:
+        return "Working"
+    if callback_data in CALLBACK_LABELS:
+        return CALLBACK_LABELS[callback_data]
+    # Generic prefix-based fallbacks for patterns like cmd_risk_100
+    if callback_data.startswith("cmd_risk_"):
+        return f"Risk set ${callback_data.split('_')[-1]}"
+    if callback_data.startswith("conn_ex_"):
+        return f"Connecting {callback_data.split('_')[-1].upper()}"
+    return callback_data.replace("_", " ").title()
 
 
 def get_panel(uid: int) -> Optional[dict]:
@@ -198,16 +305,49 @@ def _active_pairs(uid: int) -> list:
         return []
 
 
-def _system_status() -> str:
-    """Coarse OK/Warning signal — kill switch or panic state trigger Warning."""
+def _system_status(uid: int) -> str:
+    """Three-state health indicator. Per-user runtime state takes precedence,
+    then global kill-switch / dry-run flags, else Healthy."""
+    # Runtime state set by button_callback pre/post hooks
+    state = _user_state.get(uid, "healthy")
+    if state == "busy":
+        return "🟡 System: Busy"
+    if state == "error":
+        return "🔴 System: Error"
+    # Global flags override Healthy
     try:
         if getattr(SETTINGS, "KILL_SWITCH", False):
-            return "⚠️ KILL SWITCH"
+            return "🔴 System: Kill Switch"
         if getattr(SETTINGS, "DRY_RUN_MODE", False):
-            return "🟡 DRY RUN"
+            return "🟡 System: Dry Run"
     except Exception:
         pass
-    return "🟢 OK"
+    return "🟢 System: Healthy"
+
+
+def _signal_glyph(direction: str) -> str:
+    """Directional emoji for the last signal line."""
+    d = (direction or "").upper()
+    if d in ("BUY", "BULL", "BULLISH"):
+        return "📈"
+    if d in ("SELL", "BEAR", "BEARISH"):
+        return "📉"
+    if d in ("WARN", "WARNING", "RISK"):
+        return "⚠️"
+    return "➖"
+
+
+def _open_trades_count(uid: int) -> int:
+    """Best-effort active-trade count for the header."""
+    try:
+        from storage import fetchone
+        row = fetchone(
+            "SELECT COUNT(*) FROM trades WHERE status='OPEN' AND user_id=?",
+            (uid,),
+        )
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
 
 
 def build_panel_text(uid: int) -> str:
@@ -222,18 +362,34 @@ def build_panel_text(uid: int) -> str:
 
     sig = _last_signal.get(uid)
     if sig:
-        last = f"{sig['direction']} (s={sig['score']:.2f}, c={sig['conf']:.2f})"
+        glyph = _signal_glyph(sig.get("direction", ""))
+        last_sig = f"{glyph} {sig['direction']} (s={sig['score']:.2f}, c={sig['conf']:.2f})"
     else:
-        last = "—"
+        last_sig = "—"
 
-    status = _system_status()
+    status = _system_status(uid)
+    open_n = _open_trades_count(uid)
+
+    last_act = _last_action.get(uid)
+    if last_act:
+        act_age = int(time.time() - last_act["ts"])
+        if act_age < 60:
+            act_age_str = f"{act_age}s ago"
+        elif act_age < 3600:
+            act_age_str = f"{act_age // 60}m ago"
+        else:
+            act_age_str = f"{act_age // 3600}h ago"
+        last_action_line = f"Last Action: `{last_act['text']}` _({act_age_str})_"
+    else:
+        last_action_line = "Last Action: `—`"
 
     return (
         "*MCDAutoTrader Control Panel*\n"
-        f"Mode: `{mode}`   AutoTrade: `{autotrade}`\n"
+        f"Mode: `{mode}`   AutoTrade: `{autotrade}`   Open: `{open_n}`\n"
         f"Pairs: `{pairs_str}`\n"
-        f"Last Signal: `{last}`\n"
-        f"System: {status}\n\n"
+        f"Last Signal: {last_sig}\n"
+        f"{last_action_line}\n"
+        f"{status}\n\n"
         "Select an action:"
     )
 
@@ -260,8 +416,16 @@ async def refresh_panel(bot, chat_id: int, uid: int, status_line: Optional[str] 
     markup = build_panel_keyboard()
     tracked = _panel_state.get(uid)
 
+    # Content-hash dedupe: if nothing changed, skip the API call. This prevents
+    # the auto-refresh job from spamming Telegram with "message is not modified"
+    # errors and saves rate-limit budget.
+    import hashlib
+    content_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+
     # Try edit first
     if tracked and tracked.get("chat_id") == chat_id:
+        if tracked.get("last_rendered_hash") == content_hash:
+            return  # nothing changed — skip API call entirely
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -271,6 +435,7 @@ async def refresh_panel(bot, chat_id: int, uid: int, status_line: Optional[str] 
                 parse_mode="Markdown",
             )
             tracked["updated_ts"] = time.time()
+            tracked["last_rendered_hash"] = content_hash
             return
         except Exception as e:
             # Edit failed (deleted, too old, identical content, etc.). Fall through to send.
@@ -282,8 +447,51 @@ async def refresh_panel(bot, chat_id: int, uid: int, status_line: Optional[str] 
             chat_id=chat_id, text=text, reply_markup=markup, parse_mode="Markdown"
         )
         track_panel(uid, chat_id, msg.message_id)
+        if uid in _panel_state:
+            _panel_state[uid]["last_rendered_hash"] = content_hash
     except Exception as e:
         log.warning("panel.refresh_panel send failed for uid=%s: %s", uid, e)
+
+
+async def auto_refresh_all(bot) -> None:
+    """
+    Background job: periodically refresh every tracked panel.
+
+    Safety rails:
+      - Skips users whose panel hasn't been interacted with in > 10 min
+        (stale — no point polling Telegram for it).
+      - refresh_panel() dedupes by content hash, so unchanged panels do NOT
+        hit the Telegram API at all.
+      - Catches per-user exceptions so one failing panel never blocks the rest.
+      - Also auto-clears a stale 'busy' state > 30s old (failsafe if a handler
+        forgot to reset it on an unusual exit path).
+    """
+    if not is_enabled():
+        return
+
+    now = time.time()
+    STALE_AFTER = 600  # 10 min
+    BUSY_TIMEOUT = 30  # seconds
+
+    # Snapshot keys — panel state can mutate during iteration.
+    uids = list(_panel_state.keys())
+    for uid in uids:
+        tracked = _panel_state.get(uid)
+        if not tracked:
+            continue
+        if now - tracked.get("updated_ts", 0) > STALE_AFTER:
+            continue
+
+        # Clear stuck busy state so header doesn't lie.
+        if _user_state.get(uid) == "busy":
+            last_act = _last_action.get(uid)
+            if last_act and now - last_act.get("ts", 0) > BUSY_TIMEOUT:
+                _user_state[uid] = "healthy"
+
+        try:
+            await refresh_panel(bot, tracked["chat_id"], uid)
+        except Exception as e:
+            log.debug("auto_refresh_all for uid=%s failed: %s", uid, e)
 
 
 async def send_with_panel_refresh(bot, chat_id: int, uid: int, send_coro) -> None:
