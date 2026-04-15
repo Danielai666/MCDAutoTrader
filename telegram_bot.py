@@ -128,15 +128,15 @@ def main_menu_keyboard():
          InlineKeyboardButton("🎨 Visuals", callback_data="cmd_visuals")],
         [InlineKeyboardButton("🧠 AI Card", callback_data="cmd_ai_card"),
          InlineKeyboardButton("⚙️ My Account", callback_data="cmd_myaccount")],
-        [InlineKeyboardButton("📸 Analyze Charts", callback_data="cmd_analyze_screens"),
-         InlineKeyboardButton("🔌 Disconnect Exchange", callback_data="cmd_disconnect")],
-        [InlineKeyboardButton("💚 Health Stats", callback_data="cmd_health_stats"),
+        [InlineKeyboardButton("📸 Analyze", callback_data="cmd_analyze_screens"),
+         InlineKeyboardButton("🔗 Connect", callback_data="cmd_connect")],
+        [InlineKeyboardButton("💚 Health", callback_data="cmd_health_stats"),
          InlineKeyboardButton("🚀 Go Live", callback_data="cmd_golive")],
         [InlineKeyboardButton("🆘 PANIC STOP", callback_data="cmd_panic_stop")],
         [InlineKeyboardButton("📊 Report ➤", callback_data="menu_reporting"),
          InlineKeyboardButton("🌐 Pairs ➤", callback_data="menu_pairs")],
-        [InlineKeyboardButton("🔗 Connect Exchange", callback_data="cmd_connect")],
-        [InlineKeyboardButton("🔧 Admin ➤", callback_data="menu_admin")],
+        [InlineKeyboardButton("🔌 Disconnect", callback_data="cmd_disconnect"),
+         InlineKeyboardButton("🔧 Admin ➤", callback_data="menu_admin")],
     ])
 
 def reporting_keyboard():
