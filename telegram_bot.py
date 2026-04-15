@@ -113,7 +113,9 @@ def main_menu_keyboard():
         [InlineKeyboardButton("📊 Signal", callback_data="cmd_signal"),
          InlineKeyboardButton("💰 Price", callback_data="cmd_price")],
         [InlineKeyboardButton("📈 Status", callback_data="cmd_status"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="cmd_settings")],
+         InlineKeyboardButton("🔥 Heatmap", callback_data="cmd_heatmap")],
+        [InlineKeyboardButton("📍 Positions", callback_data="cmd_positions_card"),
+         InlineKeyboardButton("⚠️ Risk Board", callback_data="cmd_risk_board")],
         [InlineKeyboardButton("🛡️ Guards", callback_data="cmd_guards"),
          InlineKeyboardButton("🔍 Check Guards", callback_data="cmd_checkguards")],
         [InlineKeyboardButton("🤖 AutoTrade ➤", callback_data="menu_autotrade"),
@@ -122,6 +124,13 @@ def main_menu_keyboard():
          InlineKeyboardButton("🛑 Sell Now", callback_data="cmd_sellnow")],
         [InlineKeyboardButton("📐 SL / TP / Trail ➤", callback_data="menu_guards_set")],
         [InlineKeyboardButton("❌ Cancel Guards ➤", callback_data="menu_cancel")],
+        [InlineKeyboardButton("📊 Backtest", callback_data="cmd_backtest"),
+         InlineKeyboardButton("🎨 Visuals", callback_data="cmd_visuals")],
+        [InlineKeyboardButton("🧠 AI Card", callback_data="cmd_ai_card"),
+         InlineKeyboardButton("⚙️ My Account", callback_data="cmd_myaccount")],
+        [InlineKeyboardButton("💚 Health Stats", callback_data="cmd_health_stats"),
+         InlineKeyboardButton("🚀 Go Live", callback_data="cmd_golive")],
+        [InlineKeyboardButton("🆘 PANIC STOP", callback_data="cmd_panic_stop")],
         [InlineKeyboardButton("📊 Report ➤", callback_data="menu_reporting"),
          InlineKeyboardButton("🌐 Pairs ➤", callback_data="menu_pairs")],
         [InlineKeyboardButton("🔗 Connect Exchange", callback_data="cmd_connect"),
@@ -912,6 +921,144 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
 
+    # --- New visual card commands ---
+    elif data == "cmd_heatmap":
+        await query.edit_message_text("Building heatmap...")
+        try:
+            from pair_manager import get_active_pairs
+            from scheduler import _compute_signals
+            from visuals.cards import render_heatmap_card
+            pairs = get_active_pairs(uid)[:10] or [SETTINGS.PAIR]
+            tfs = ['15m', '1h', '4h', '1d']
+            data_rows = []
+            for p in pairs:
+                try:
+                    scores = {}
+                    for tf in tfs:
+                        f = await _compute_signals(p)
+                        m = f.get('merged', {})
+                        scores[tf] = m.get('merged_score', 0)
+                    data_rows.append({'pair': p, 'scores': scores})
+                except Exception:
+                    pass
+            png = render_heatmap_card(data_rows, tfs)
+            import io as _io
+            await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
+                                     caption="Watchlist Heatmap", reply_markup=back_keyboard())
+        except Exception as e:
+            await app.bot.send_message(chat_id=chat_id, text=f"Heatmap error: {e}", reply_markup=back_keyboard())
+
+    elif data == "cmd_positions_card":
+        try:
+            from storage import fetchall
+            from exchange import market_price
+            from visuals.cards import render_position_card
+            rows = fetchall("SELECT pair, side, qty, entry FROM trades WHERE status='OPEN' AND user_id=?", (uid,))
+            positions = []
+            for pair, side, qty, entry in (rows or []):
+                try: px = market_price(pair)
+                except: px = float(entry)
+                pnl = (px - float(entry)) * float(qty) if side == 'BUY' else (float(entry) - px) * float(qty)
+                positions.append({
+                    'pair': pair, 'side': side, 'qty': float(qty),
+                    'entry': float(entry), 'current_price': px, 'pnl': pnl,
+                })
+            png = render_position_card(positions)
+            import io as _io
+            summary = f"Open: {len(positions)} positions" if positions else "No open positions"
+            await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
+                                     caption=summary, reply_markup=back_keyboard())
+        except Exception as e:
+            await app.bot.send_message(chat_id=chat_id, text=f"Positions error: {e}", reply_markup=back_keyboard())
+
+    elif data == "cmd_risk_board":
+        try:
+            from risk import portfolio_exposure_check, realized_pnl_today, get_equity_status
+            from fundamentals import get_news_event_risk
+            from user_context import UserContext
+            ctx = UserContext.load(uid)
+            _, exp, _ = portfolio_exposure_check(ctx)
+            max_exp = ctx.capital_usd * ctx.max_portfolio_exposure
+            eq = get_equity_status(ctx)
+            er = get_news_event_risk()
+            risk_data = {
+                'exposure_pct': exp / max_exp if max_exp > 0 else 0,
+                'daily_loss_pct': abs(realized_pnl_today(uid)) / ctx.daily_loss_limit if ctx.daily_loss_limit else 0,
+                'drawdown_pct': eq.get('drawdown_pct', 0),
+                'correlation_risk': 50,
+                'event_risk_score': er.get('score', 50),
+                'blocked_reasons': [],
+            }
+            from visuals.cards import render_risk_dashboard_card
+            png = render_risk_dashboard_card(risk_data)
+            import io as _io
+            summary = f"Exposure: ${exp:.0f} | DD: {eq.get('drawdown_pct', 0):.1%} | Event: {er.get('level', '?')}"
+            await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
+                                     caption=summary, reply_markup=back_keyboard())
+        except Exception as e:
+            await app.bot.send_message(chat_id=chat_id, text=f"Risk board error: {e}", reply_markup=back_keyboard())
+
+    elif data == "cmd_ai_card":
+        try:
+            from storage import fetchall
+            from visuals.cards import render_ai_decision_card
+            rows = fetchall(
+                "SELECT pair, action, side, confidence, source, fusion_policy, ts "
+                "FROM ai_decisions WHERE user_id=? ORDER BY id DESC LIMIT 8", (uid,)) or []
+            decisions = [{
+                'pair': r[0], 'action': r[1], 'side': r[2] or '',
+                'confidence': float(r[3]) if r[3] else 0,
+                'source': r[4] or '', 'policy': r[5] or '', 'ts': r[6]
+            } for r in rows]
+            png = render_ai_decision_card(decisions)
+            import io as _io
+            await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
+                                     caption=f"Last {len(decisions)} AI decisions", reply_markup=back_keyboard())
+        except Exception as e:
+            await app.bot.send_message(chat_id=chat_id, text=f"AI card error: {e}", reply_markup=back_keyboard())
+
+    elif data == "cmd_myaccount":
+        try:
+            from user_context import UserContext
+            from crypto_utils import mask_secret
+            ctx = UserContext.load(uid)
+            lines = [
+                "My Account",
+                f"User ID: {ctx.user_id}",
+                f"Tier: {ctx.tier}",
+                f"Capital: ${ctx.capital_usd:,.2f}",
+                f"Risk/Trade: {ctx.risk_per_trade:.1%}",
+                f"Max Open: {ctx.max_open_trades}",
+                f"Mode: {ctx.trade_mode} | Paper: {'Yes' if ctx.paper_trading else 'No'}",
+                f"AutoTrade: {'ON' if ctx.autotrade_enabled else 'OFF'}",
+                f"Exchange: {ctx.exchange_name}",
+                f"API Key: {mask_secret(ctx.exchange_key) if ctx.exchange_key else 'Not set'}",
+            ]
+            await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
+        except Exception as e:
+            await app.bot.send_message(chat_id=chat_id, text=f"Account error: {e}", reply_markup=back_keyboard())
+
+    elif data == "cmd_health_stats":
+        if admin_only(uid):
+            from health_telemetry import format_health_stats
+            await app.bot.send_message(chat_id=chat_id, text=format_health_stats(), reply_markup=back_keyboard())
+        else:
+            await query.edit_message_text("⛔ Admin only", reply_markup=back_keyboard())
+
+    elif data == "cmd_golive":
+        await query.edit_message_text("Use /golive command to run the wizard", reply_markup=back_keyboard())
+
+    elif data == "cmd_panic_stop":
+        await query.edit_message_text("Use /panic_stop command to confirm and execute", reply_markup=back_keyboard())
+
+    elif data == "cmd_backtest":
+        await query.edit_message_text("Use: /backtest <pair> [days] [timeframe]\nExample: /backtest BTC/USD 30 1h",
+                                      reply_markup=back_keyboard())
+
+    elif data == "cmd_visuals":
+        await query.edit_message_text("Use /visuals command to open visual settings",
+                                      reply_markup=back_keyboard())
+
     # --- Manual confirm trade execution ---
     elif data.startswith("confirm_trade_"):
         # Format: confirm_trade_{PAIR}_{SIDE}
@@ -1169,12 +1316,36 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 Main Menu", reply_markup=main_menu_keyboard())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📋 Tap /menu for the button menu\n\nOr type commands:\n"
-        "/status  /settings  /signal\n/autotrade on|off  /mode paper|live\n"
-        "/risk daily <usd>\n/sl <price>  /tp <price>  /trail <percent>\n"
-        "/cancel sl|tp|trail|all\n/sellnow  /guards  /checkguards  /price",
-        reply_markup=main_menu_keyboard()
+    txt = (
+        "📋 Tap /menu for the button menu\n\n"
+        "━━ CORE ━━\n"
+        "/status  /signal  /price  /settings\n\n"
+        "━━ TRADING ━━\n"
+        "/autotrade on|off  /mode paper|live\n"
+        "/risk daily <usd>  /sellnow  /killswitch\n"
+        "/panic_stop  /golive\n\n"
+        "━━ GUARDS ━━\n"
+        "/sl <price>  /tp <price>  /trail <%>\n"
+        "/cancel sl|tp|trail|all\n"
+        "/guards  /checkguards\n\n"
+        "━━ PAIRS ━━\n"
+        "/pairs  /addpair <PAIR>  /rmpair <PAIR>\n"
+        "/ranking\n\n"
+        "━━ REPORTS ━━\n"
+        "/positions  /trades  /pnl  /report\n"
+        "/blocked  /backtest <pair> [days] [tf]\n\n"
+        "━━ AI / ANALYSIS ━━\n"
+        "/ai  /divzones  /divradar\n"
+        "/analyze_screens  /done\n\n"
+        "━━ ADMIN ━━\n"
+        "/health  /health_stats\n"
+        "/liveready  /reconcile [fix]\n"
+        "/capital <usd>  /maxexposure <0.0-1.0>\n\n"
+        "━━ MULTI-USER ━━\n"
+        "/setkeys <key> <secret>\n"
+        "/myaccount  /visuals"
     )
+    await update.message.reply_text(txt, reply_markup=main_menu_keyboard())
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_status(context.application, update.effective_chat.id, update.effective_user.id)
