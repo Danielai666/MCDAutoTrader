@@ -94,16 +94,18 @@ def end_session(user_id: int):
 # Analysis prompt
 # -------------------------------------------------------------------
 
-_ANALYSIS_PROMPT = """You are a professional technical chart analyst. Analyze the provided chart screenshot(s).
+_ANALYSIS_PROMPT = """You are a professional technical chart analyst providing CONTEXT and CONFIRMATION for a signal pipeline whose PRIMARY divergence detection comes from indicator math (RSI/MACD) elsewhere in the system.
+
+Your role is NOT to be the primary divergence detector. Treat any divergence you see on the chart as a CONFIRMATION cue only — the authoritative divergence signal comes from the indicator engine, not from vision. Focus your value on: market context, candlestick/price-action patterns, structural levels, and confluence that the indicator engine cannot compute from OHLCV alone.
 
 For each chart, identify and report:
 
 1. **Symbol & Timeframe** (if visible)
 2. **Trend Summary**: overall direction (bullish/bearish/sideways), strength
-3. **Divergence**: any MACD or RSI divergence visible (regular or hidden)
+3. **Divergence (confirmation only)**: note if chart visually agrees/disagrees with a potential RSI/MACD divergence. Do NOT treat this as a standalone trigger.
 4. **Indicator States**: RSI level, MACD position, moving average alignment
-5. **Candlestick Patterns**: any reversal or continuation patterns at key levels
-6. **Key Levels**: support/resistance, previous highs/lows
+5. **Candlestick Patterns**: any reversal or continuation patterns at key levels (PRIMARY vision value)
+6. **Key Levels**: support/resistance, previous highs/lows (PRIMARY vision value)
 7. **Actionable Plan**:
    - Entry zone (price range)
    - Stop Loss level
