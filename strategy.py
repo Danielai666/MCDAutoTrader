@@ -193,33 +193,45 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
         except Exception:
             pass
 
-    # --- direction decision (threshold 1.5) ---
+    # --- direction decision (threshold 1.2, non-trigger path) ---
     direction = 'HOLD'
     score = buy_score - sell_score
-    if buy_score >= 1.5 and buy_score > sell_score: direction = 'BUY'
-    elif sell_score >= 1.5 and sell_score > buy_score: direction = 'SELL'
+    if buy_score >= 1.2 and buy_score > sell_score: direction = 'BUY'
+    elif sell_score >= 1.2 and sell_score > buy_score: direction = 'SELL'
 
     # --- Strong divergence trigger (only overrides HOLD, never flips direction) ---
-    # A high-strength regular divergence with candle confirmation is itself
-    # a valid setup even if total score is below the 1.5 threshold.
+    # Regular divergence >= 0.65 OR hidden divergence >= 0.75, with candle
+    # confirmation and ADX in a tradeable range (20..45). Opposing score must
+    # stay below 1.5 so we never flip an opposing directional signal.
     if direction == 'HOLD':
-        DIV_TRIGGER_STR = 0.65  # clear divergence threshold
-        strong_bull_div = (md_type == 'bullish' and md_str >= DIV_TRIGGER_STR) or \
+        DIV_TRIGGER_STR = 0.65  # regular divergence threshold
+        HID_DIV_TRIGGER_STR = 0.75  # hidden divergence threshold (higher bar)
+
+        strong_reg_bull = (md_type == 'bullish' and md_str >= DIV_TRIGGER_STR) or \
                           (rd_type == 'bullish' and rd_str >= DIV_TRIGGER_STR)
-        strong_bear_div = (md_type == 'bearish' and md_str >= DIV_TRIGGER_STR) or \
+        strong_reg_bear = (md_type == 'bearish' and md_str >= DIV_TRIGGER_STR) or \
                           (rd_type == 'bearish' and rd_str >= DIV_TRIGGER_STR)
+        strong_hid_bull = (hid_md_type == 'hidden_bullish' and hid_md_str >= HID_DIV_TRIGGER_STR) or \
+                          (hid_rd_type == 'hidden_bullish' and hid_rd_str >= HID_DIV_TRIGGER_STR)
+        strong_hid_bear = (hid_md_type == 'hidden_bearish' and hid_md_str >= HID_DIV_TRIGGER_STR) or \
+                          (hid_rd_type == 'hidden_bearish' and hid_rd_str >= HID_DIV_TRIGGER_STR)
+
+        div_trigger_bull = strong_reg_bull or strong_hid_bull
+        div_trigger_bear = strong_reg_bear or strong_hid_bear
 
         candle_bull = bool(candle_summary and candle_summary.get('net_score', 0) > 0.2)
         candle_bear = bool(candle_summary and candle_summary.get('net_score', 0) < -0.2)
 
-        if strong_bull_div and candle_bull and sell_score < 1.5:
+        adx_ok = 20.0 <= cur_adx <= 45.0
+
+        if div_trigger_bull and candle_bull and adx_ok and sell_score < 1.5:
             direction = 'BUY'
             score = max(score, 1.5)
-            reasons.append('TRIGGER: strong bull divergence + candle confirm')
-        elif strong_bear_div and candle_bear and buy_score < 1.5:
+            reasons.append('TRIGGER: strong bull divergence + candle confirm + ADX ok')
+        elif div_trigger_bear and candle_bear and adx_ok and buy_score < 1.5:
             direction = 'SELL'
             score = min(score, -1.5)
-            reasons.append('TRIGGER: strong bear divergence + candle confirm')
+            reasons.append('TRIGGER: strong bear divergence + candle confirm + ADX ok')
 
     return _build_result(
         direction, score, ', '.join(reasons),

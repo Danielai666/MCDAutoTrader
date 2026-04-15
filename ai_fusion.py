@@ -255,7 +255,7 @@ def _local_heuristic(features: dict) -> AIDecision:
             triggered = True
             break
     if triggered:
-        conf += 0.05
+        conf += 0.10
         reasons.append('Divergence trigger fired')
 
     conf = max(0.0, min(1.0, conf))
