@@ -169,7 +169,13 @@ TEXT = {
         "portfolio_connect_hint": "Use the Connect button to link your exchange.",
         "portfolio_short": "Portfolio",
         "portfolio_pnl_short": "PnL",
+        "portfolio_unrealized_short": "Unrealized",
         "portfolio_fetching": "Fetching portfolio...",
+        "portfolio_equity": "True Equity",
+        "portfolio_unrealized": "Unrealized PnL",
+        "portfolio_open_positions": "Open Positions",
+        "portfolio_no_open": "No open positions.",
+        "portfolio_real_label": "Real trade history (approx.)",
 
         # --- Bottom ReplyKeyboard (persistent row above text input) ---
         "rk_menu": "Menu",
@@ -322,7 +328,13 @@ TEXT = {
         "portfolio_connect_hint": "برای اتصال از دکمه «اتصال» استفاده کنید.",
         "portfolio_short": "پورتفولیو",
         "portfolio_pnl_short": "سود/زیان",
+        "portfolio_unrealized_short": "سود/زیان باز",
         "portfolio_fetching": "در حال دریافت پورتفولیو...",
+        "portfolio_equity": "ارزش واقعی",
+        "portfolio_unrealized": "سود/زیان محقق‌نشده",
+        "portfolio_open_positions": "پوزیشن‌های باز",
+        "portfolio_no_open": "هیچ پوزیشن بازی وجود ندارد.",
+        "portfolio_real_label": "تاریخچه واقعی (تقریبی)",
 
         # --- Bottom ReplyKeyboard ---
         "rk_menu": "منو",

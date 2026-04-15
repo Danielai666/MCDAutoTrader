@@ -2368,8 +2368,36 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args or []
 
-    # Report subcommand
+    # Report subcommand: /portfolio report [7d|30d|real]
     if args and args[0].lower() == "report":
+        # /portfolio report real  — exchange-side PnL via fetch_my_trades
+        if len(args) >= 2 and args[1].lower() == "real":
+            days = 30
+            if len(args) >= 3:
+                raw = args[2].lower().rstrip("d")
+                try:
+                    days = max(1, min(365, int(raw)))
+                except ValueError:
+                    days = 30
+            placeholder = await update.message.reply_text(_t(uid, "portfolio_fetching"))
+            try:
+                report = await _pf.compute_report_real(uid, window_days=days)
+                text = (
+                    f"_{_t(uid, 'portfolio_real_label')}_\n" +
+                    _pf.format_report(uid, report)
+                )
+                await placeholder.edit_text(
+                    text, parse_mode="Markdown", reply_markup=back_keyboard()
+                )
+            except Exception as e:
+                log.error("portfolio real report failed: %s", e)
+                try:
+                    await placeholder.edit_text(f"Real report error: {e}", reply_markup=back_keyboard())
+                except Exception:
+                    pass
+            return
+
+        # Standard window report (from local trades table)
         days = 7
         if len(args) >= 2:
             raw = args[1].lower().rstrip("d")

@@ -53,16 +53,38 @@ class Asset:
 
 
 @dataclass
+class OpenPosition:
+    """Unified open-position record, sourced from either:
+      - the bot's trades table (`source='bot'`) — gives us entry price for
+        spot exchanges that have no native position concept, OR
+      - CCXT fetch_positions (`source='exchange'`) — derivatives venues only.
+    """
+    symbol: str                # e.g. "BTC/USD" (bot) or "BTC/USD:USD" (derivatives)
+    side: str                  # 'BUY' / 'SELL' (bot) or 'long' / 'short' (exchange)
+    size: float
+    entry_price: float
+    current_price: float
+    unrealized_pnl: float
+    unrealized_pct: float
+    source: str = "bot"        # 'bot' | 'exchange'
+
+
+@dataclass
 class PortfolioSnapshot:
     # sync_status: 'OK' | 'NO_EXCHANGE' | 'PAPER' | 'ERROR'
     sync_status: str = "OK"
     sync_error: str = ""
     last_sync_ts: int = 0
     exchange_id: str = ""
-    total_value: float = 0.0
-    available_cash: float = 0.0      # stablecoin balance
-    positions_value: float = 0.0     # non-stablecoin holdings
+    total_value: float = 0.0          # cash + positions_value (asset holdings)
+    available_cash: float = 0.0       # stablecoin balance
+    positions_value: float = 0.0      # non-stablecoin holdings (mark-to-market)
+    unrealized_pnl: float = 0.0       # sum of unrealized PnL across open_positions
+    true_equity: float = 0.0          # total_value (already mark-to-market) — kept
+                                      # for parity with derivatives accounting
     assets: List[Asset] = field(default_factory=list)
+    open_positions: List[OpenPosition] = field(default_factory=list)
+    reconcile_warning: str = ""       # non-empty when bot/exchange disagree
 
 
 @dataclass
@@ -205,6 +227,23 @@ def _build_snapshot_sync(uid: int) -> PortfolioSnapshot:
         snap.available_cash = round(cash, 2)
         snap.positions_value = round(positions, 2)
         snap.total_value = round(cash + positions, 2)
+
+        # --- Open positions + unrealized PnL -----------------------------
+        # Primary source: bot trades table (has entry prices). Secondary:
+        # fetch_positions() if the exchange supports it (derivatives only;
+        # Kraken spot returns []).
+        snap.open_positions = _collect_open_positions(uid, client, exchange_id)
+        snap.unrealized_pnl = round(
+            sum(p.unrealized_pnl for p in snap.open_positions), 2
+        )
+        # true_equity = mark-to-market of all holdings. On spot, this is
+        # already total_value because `assets` is priced at current marks.
+        # Kept as a named field for dashboard parity.
+        snap.true_equity = snap.total_value
+
+        # --- Reconciliation: bot expected qty vs exchange balance --------
+        snap.reconcile_warning = _reconcile_check(uid, balance)
+
         snap.sync_status = "OK"
     except Exception as e:
         log.warning("portfolio fetch_balance failed for uid=%s: %s", uid, e)
@@ -212,6 +251,137 @@ def _build_snapshot_sync(uid: int) -> PortfolioSnapshot:
         snap.sync_error = str(e)[:160]
 
     return snap
+
+
+# -------------------------------------------------------------------
+# Open positions + unrealized PnL
+# -------------------------------------------------------------------
+def _base_asset(pair: str) -> str:
+    """Return base asset from a pair like 'BTC/USDT' → 'BTC'."""
+    return (pair or "").split("/")[0].split(":")[0].upper()
+
+
+def _collect_open_positions(uid: int, client, exchange_id: str) -> List[OpenPosition]:
+    positions: List[OpenPosition] = []
+
+    # 1. Bot-tracked OPEN trades (primary for spot)
+    try:
+        rows = fetchall(
+            "SELECT pair, side, qty, entry FROM trades "
+            "WHERE user_id=? AND status='OPEN'",
+            (uid,),
+        )
+    except Exception as e:
+        log.debug("portfolio: bot trades query failed: %s", e)
+        rows = []
+
+    for row in rows:
+        pair, side, qty, entry = row
+        try:
+            qty_f = float(qty or 0.0)
+            entry_f = float(entry or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty_f <= 0 or entry_f <= 0:
+            continue
+        # Get current price via ticker
+        try:
+            t = client.fetch_ticker(pair)
+            cur = float(t.get("last") or t.get("close") or 0.0)
+        except Exception:
+            cur = 0.0
+        if cur <= 0:
+            # Fall back to stablecoin valuation through _usd_price
+            cur = _usd_price(client, exchange_id, _base_asset(pair))
+        if cur <= 0:
+            continue
+        side_u = (side or "BUY").upper()
+        if side_u == "BUY":
+            upnl = (cur - entry_f) * qty_f
+        else:
+            upnl = (entry_f - cur) * qty_f
+        upct = ((cur - entry_f) / entry_f * 100.0) if side_u == "BUY" else \
+               ((entry_f - cur) / entry_f * 100.0)
+        positions.append(OpenPosition(
+            symbol=pair, side=side_u, size=qty_f,
+            entry_price=round(entry_f, 6), current_price=round(cur, 6),
+            unrealized_pnl=round(upnl, 2), unrealized_pct=round(upct, 2),
+            source="bot",
+        ))
+
+    # 2. Derivatives-style fetch_positions (bonus; harmless on spot)
+    try:
+        if client.has.get("fetchPositions"):
+            exch_positions = client.fetch_positions() or []
+            for p in exch_positions:
+                try:
+                    contracts = float(p.get("contracts") or 0.0)
+                    if contracts <= 0:
+                        continue
+                    entry = float(p.get("entryPrice") or 0.0)
+                    mark = float(p.get("markPrice") or p.get("lastPrice") or 0.0)
+                    upnl = float(p.get("unrealizedPnl") or 0.0)
+                    upct = float(p.get("percentage") or 0.0)
+                    positions.append(OpenPosition(
+                        symbol=str(p.get("symbol", "?")),
+                        side=str(p.get("side", "")).lower(),
+                        size=contracts,
+                        entry_price=round(entry, 6),
+                        current_price=round(mark, 6),
+                        unrealized_pnl=round(upnl, 2),
+                        unrealized_pct=round(upct, 2),
+                        source="exchange",
+                    ))
+                except Exception:
+                    continue
+    except Exception:
+        # Many spot exchanges raise on fetch_positions. Silent fallback.
+        pass
+
+    return positions
+
+
+def _reconcile_check(uid: int, balance: dict) -> str:
+    """
+    Lightweight per-user reconciliation: for each symbol the bot has OPEN
+    trades on, verify the exchange balance is at least the bot-expected qty.
+    Returns a warning string or empty.
+
+    On spot, user may hold MORE than bot-tracked (pre-existing balance is
+    fine). Flag only under-balance: bot expects 0.01 BTC but exchange
+    shows 0.005 BTC → probably a manual close or failed trade.
+    """
+    try:
+        rows = fetchall(
+            "SELECT pair, SUM(qty) FROM trades "
+            "WHERE user_id=? AND status='OPEN' AND side='BUY' "
+            "GROUP BY pair",
+            (uid,),
+        )
+    except Exception:
+        return ""
+
+    totals = balance.get("total", {}) or {}
+    warnings = []
+    for pair, expected_qty in rows:
+        try:
+            expected = float(expected_qty or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if expected <= 0:
+            continue
+        asset = _base_asset(pair)
+        have = 0.0
+        try:
+            have = float(totals.get(asset, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            have = 0.0
+        # Tolerate 1% float drift (rounding / fees)
+        if have < expected * 0.99:
+            warnings.append(f"{asset}: bot expects {expected:.6f}, exchange has {have:.6f}")
+    if warnings:
+        return "⚠️ Sync mismatch: " + "; ".join(warnings)
+    return ""
 
 
 async def fetch_portfolio(uid: int, force: bool = False) -> PortfolioSnapshot:
@@ -297,6 +467,20 @@ def _tr(uid: Optional[int], key: str, fallback: str) -> str:
         return fallback
 
 
+def _signed_money(v: float) -> str:
+    """Render a signed USD amount with the sign on the OUTSIDE of the $:
+    12.3 -> '+$12.30', -5.0 -> '-$5.00', 0 -> '$0.00'."""
+    try:
+        v = float(v or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v > 0:
+        return f"+${v:,.2f}"
+    if v < 0:
+        return f"-${abs(v):,.2f}"
+    return f"${v:,.2f}"
+
+
 def format_portfolio(uid: int, snap: PortfolioSnapshot, max_assets: int = 10) -> str:
     title = _tr(uid, "portfolio_title", "💼 Portfolio")
 
@@ -316,16 +500,42 @@ def format_portfolio(uid: int, snap: PortfolioSnapshot, max_assets: int = 10) ->
 
     # OK path
     when = time.strftime("%H:%M:%S", time.localtime(snap.last_sync_ts)) if snap.last_sync_ts else "—"
+    true_eq = snap.true_equity or snap.total_value
+    upnl = snap.unrealized_pnl or 0.0
+
     lines = [
         f"*{title}*",
         f"{_tr(uid, 'portfolio_exchange', 'Exchange')}: `{snap.exchange_id.upper()}`",
         f"{_tr(uid, 'portfolio_sync', 'Exchange Sync')}: `OK`   _({when})_",
         "",
+        f"{_tr(uid, 'portfolio_equity', 'True Equity')}: `${true_eq:,.2f}`",
         f"{_tr(uid, 'portfolio_total', 'Total value')}: `${snap.total_value:,.2f}`",
         f"{_tr(uid, 'portfolio_cash', 'Available cash')}: `${snap.available_cash:,.2f}`",
         f"{_tr(uid, 'portfolio_positions_value', 'In positions')}: `${snap.positions_value:,.2f}`",
+        f"{_tr(uid, 'portfolio_unrealized', 'Unrealized PnL')}: `{_signed_money(upnl)}`",
     ]
 
+    # Reconcile warning
+    if snap.reconcile_warning:
+        lines.append("")
+        lines.append(snap.reconcile_warning)
+
+    # Open positions section
+    if snap.open_positions:
+        lines.append("")
+        lines.append(f"_{_tr(uid, 'portfolio_open_positions', 'Open Positions')}:_")
+        for p in snap.open_positions[:max_assets]:
+            src = "🤖" if p.source == "bot" else "📊"
+            lines.append(
+                f"{src} `{p.symbol}` {p.side}  {p.size:.6f}  "
+                f"@ `${p.entry_price:,.2f}` → `${p.current_price:,.2f}`  "
+                f"{_signed_money(p.unrealized_pnl)} ({p.unrealized_pct:+.2f}%)"
+            )
+    else:
+        lines.append("")
+        lines.append(f"_{_tr(uid, 'portfolio_no_open', 'No open positions.')}_")
+
+    # Assets
     if snap.assets:
         lines.append("")
         lines.append(f"_{_tr(uid, 'portfolio_assets', 'Assets')}:_")
@@ -358,7 +568,7 @@ def format_report(uid: int, report: PerformanceReport) -> str:
 # Panel header summary (cache-only — never triggers a fresh fetch)
 # -------------------------------------------------------------------
 def panel_summary(uid: int) -> str:
-    """Short one-line summary for the control panel header.
+    """Multi-line summary for the control panel header.
     Reads ONLY from cache to avoid blocking the panel render or adding
     API load on every auto-refresh tick. Returns empty string if there's
     nothing to show."""
@@ -368,13 +578,137 @@ def panel_summary(uid: int) -> str:
     if not snap:
         return ""  # panel stays clean until the user hits /portfolio once
     if snap.sync_status in ("NO_EXCHANGE", "ERROR"):
-        return ""  # keep panel clean for paper/error users
+        return ""
     pnl_label = _tr(uid, "portfolio_pnl_short", "PnL")
     port_label = _tr(uid, "portfolio_short", "Portfolio")
-    # Fetch 1-day PnL quickly from trades table (cheap, local)
+    upnl_label = _tr(uid, "portfolio_unrealized_short", "Unrealized")
+    # 1-day realized PnL quickly from trades table (cheap, local)
     try:
         report = compute_report(uid, window_days=1)
         pnl_pct = f"{report.roi_pct:+.2f}%"
     except Exception:
         pnl_pct = "—"
-    return f"{port_label}: `${snap.total_value:,.2f}`   {pnl_label}: `{pnl_pct}` _(1d)_"
+    upnl = snap.unrealized_pnl or 0.0
+    line1 = f"{port_label}: `${snap.total_value:,.2f}`   {pnl_label}: `{pnl_pct}` _(1d)_"
+    line2 = f"{upnl_label}: `{_signed_money(upnl)}`"
+    return f"{line1}\n{line2}"
+
+
+# -------------------------------------------------------------------
+# Real trade-history report (/portfolio report real)
+# Uses CCXT fetch_my_trades if supported. Computes simple buy-cost vs
+# sell-proceeds aggregation per symbol within a time window. NOT FIFO-
+# accurate — clearly labeled in UI as "approximate".
+# -------------------------------------------------------------------
+# uid -> (ts, PerformanceReport)  — small cache to protect API quotas
+_real_report_cache: dict = {}
+REAL_REPORT_TTL = 300  # 5 minutes
+
+
+def _compute_real_report_sync(uid: int, window_days: int) -> PerformanceReport:
+    report = PerformanceReport(window_days=window_days)
+    cred = get_credential(uid, "ccxt")
+    if not cred:
+        return report
+    try:
+        from crypto_utils import decrypt_exchange_keys
+        api_key, api_secret = decrypt_exchange_keys(
+            cred["api_key_enc"], cred["api_secret_enc"],
+            cred.get("data_key_enc", ""),
+            int(cred.get("encryption_version", 1)),
+        )
+    except Exception:
+        return report
+
+    exchange_id = cred["exchange_id"]
+    try:
+        from ccxt_provider import CCXTProvider
+        client = CCXTProvider(exchange_id, api_key, api_secret)._client
+        if not client.has.get("fetchMyTrades"):
+            return report
+        since_ms = int((time.time() - window_days * 86400) * 1000)
+        trades = client.fetch_my_trades(since=since_ms, limit=500) or []
+    except Exception as e:
+        log.warning("portfolio real report fetch failed: %s", e)
+        return report
+
+    # Per-symbol buy-cost vs sell-proceeds aggregation (approximate)
+    by_sym: dict = {}
+    for tr in trades:
+        sym = tr.get("symbol")
+        side = (tr.get("side") or "").lower()
+        price = float(tr.get("price") or 0)
+        amount = float(tr.get("amount") or 0)
+        cost = float(tr.get("cost") or price * amount)
+        fee = 0.0
+        f = tr.get("fee") or {}
+        if f and isinstance(f, dict):
+            fee = float(f.get("cost") or 0)
+        if not sym or amount <= 0 or cost <= 0:
+            continue
+        s = by_sym.setdefault(sym, {"buy_cost": 0.0, "sell_proceeds": 0.0,
+                                     "buy_qty": 0.0, "sell_qty": 0.0,
+                                     "fees": 0.0, "fills": 0})
+        if side == "buy":
+            s["buy_cost"] += cost
+            s["buy_qty"] += amount
+        elif side == "sell":
+            s["sell_proceeds"] += cost
+            s["sell_qty"] += amount
+        s["fees"] += fee
+        s["fills"] += 1
+
+    realized = 0.0
+    wins = losses = 0
+    total_fills = 0
+    best = 0.0
+    worst = 0.0
+    for sym, s in by_sym.items():
+        # Approximation: realized PnL per symbol = min(buy_qty, sell_qty)
+        # worth of sells minus the proportional buy cost.
+        qty_realized = min(s["buy_qty"], s["sell_qty"])
+        if qty_realized <= 0:
+            continue
+        avg_buy = s["buy_cost"] / s["buy_qty"] if s["buy_qty"] else 0.0
+        avg_sell = s["sell_proceeds"] / s["sell_qty"] if s["sell_qty"] else 0.0
+        pnl = (avg_sell - avg_buy) * qty_realized - s["fees"]
+        realized += pnl
+        total_fills += s["fills"]
+        if pnl > 0:
+            wins += 1
+            if pnl > best:
+                best = pnl
+        elif pnl < 0:
+            losses += 1
+            if pnl < worst:
+                worst = pnl
+
+    report.trades = total_fills
+    report.wins = wins
+    report.losses = losses
+    report.realized_pnl = round(realized, 2)
+    report.best_trade = round(best, 2)
+    report.worst_trade = round(worst, 2)
+    try:
+        from storage import fetchone
+        row = fetchone("SELECT capital_usd FROM users WHERE user_id=?", (uid,))
+        capital = float(row[0]) if row and row[0] else 0.0
+        if capital > 0:
+            report.roi_pct = round((realized / capital) * 100.0, 2)
+    except Exception:
+        pass
+    return report
+
+
+async def compute_report_real(uid: int, window_days: int = 7) -> PerformanceReport:
+    """Async wrapper with short cache — hits exchange fetch_my_trades."""
+    if not is_enabled():
+        return PerformanceReport(window_days=window_days)
+    cached = _real_report_cache.get(uid)
+    if cached and (time.time() - cached[0]) < REAL_REPORT_TTL \
+            and cached[1].window_days == window_days:
+        return cached[1]
+    loop = asyncio.get_event_loop()
+    report = await loop.run_in_executor(None, _compute_real_report_sync, uid, window_days)
+    _real_report_cache[uid] = (time.time(), report)
+    return report
