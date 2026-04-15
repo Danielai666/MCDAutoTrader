@@ -3,7 +3,7 @@ DB_ENGINE=postgres
 SUPABASE_DB_HOST=aws-0-ca-central-1.pooler.supabase.com
 SUPABASE_DB_PORT=6543
 SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres.pzxmfjlllfvqybwxfngh
+SUPABASE_DB_USER=postgres.xlmtawchpgltesmteclj
 SUPABASE_DB_PASSWORD=Saeedbh200!@
 SUPABASE_SCHEMA=trading_bot
 CREDENTIAL_ENCRYPTION_KEY=Wlv6X1YEgqEmVvRfJtfosZc5iXfyYXke0SjskJrQeAU=
