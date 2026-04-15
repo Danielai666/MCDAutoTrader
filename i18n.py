@@ -141,6 +141,14 @@ TEXT = {
         "btn_sltp_trail": "📐 SL/TP/Trail",
         "btn_cancel": "❌ Cancel",
         "btn_disconnect": "🔌 Disconnect",
+        "btn_settings": "⚙️ Settings",
+
+        # --- Settings submenu ---
+        "settings_title": "⚙️ Settings",
+        "settings_language_header": "Language",
+        "btn_lang_en": "🇬🇧 English",
+        "btn_lang_fa": "🇮🇷 فارسی",
+        "btn_back": "⬅️ Back",
 
         # --- Bottom ReplyKeyboard (persistent row above text input) ---
         "rk_menu": "Menu",
@@ -265,6 +273,14 @@ TEXT = {
         "btn_sltp_trail": "📐 SL/TP/تریل",
         "btn_cancel": "❌ لغو",
         "btn_disconnect": "🔌 قطع",
+        "btn_settings": "⚙️ تنظیمات",
+
+        # --- Settings submenu ---
+        "settings_title": "⚙️ تنظیمات",
+        "settings_language_header": "زبان",
+        "btn_lang_en": "🇬🇧 English",
+        "btn_lang_fa": "🇮🇷 فارسی",
+        "btn_back": "⬅️ بازگشت",
 
         # --- Bottom ReplyKeyboard ---
         "rk_menu": "منو",

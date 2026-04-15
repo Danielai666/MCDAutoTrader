@@ -143,6 +143,9 @@ CALLBACK_LABELS = {
     "menu_reporting": "Reporting menu",
     "menu_pairs": "Pairs menu",
     "menu_admin": "Admin menu",
+    "menu_settings": "Settings",
+    "settings_lang_en": "Language: English",
+    "settings_lang_fa": "Language: Farsi",
     # Prompts (text-input flows)
     "prompt_sl": "Set Stop Loss",
     "prompt_tp": "Set Take Profit",
@@ -260,10 +263,41 @@ def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(_btn(uid, "btn_sltp_trail", "📐 SL/TP/Trail"), callback_data="menu_guards_set"),
             InlineKeyboardButton(_btn(uid, "btn_cancel", "❌ Cancel"), callback_data="menu_cancel"),
         ],
-        # Row 10 — Disconnect
-        [InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="cmd_disconnect")],
+        # Row 10 — Settings / Disconnect
+        [
+            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings"), callback_data="menu_settings"),
+            InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="cmd_disconnect"),
+        ],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def build_settings_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Settings submenu — currently language selection, extensible for
+    future options (timezone, notifications, etc.) without touching the
+    main panel layout."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_lang_en", "🇬🇧 English"),
+                              callback_data="settings_lang_en"),
+         InlineKeyboardButton(_btn(uid, "btn_lang_fa", "🇮🇷 فارسی"),
+                              callback_data="settings_lang_fa")],
+        [InlineKeyboardButton(_btn(uid, "btn_back", "⬅️ Back"),
+                              callback_data="cmd_menu")],
+    ])
+
+
+def build_settings_text(uid: Optional[int] = None) -> str:
+    """Header text for the Settings submenu."""
+    try:
+        from i18n import t as _t, get_user_lang
+        title = _t(uid, "settings_title") if uid else _t(None, "settings_title")
+        lang_hdr = _t(uid, "settings_language_header") if uid else _t(None, "settings_language_header")
+        current = get_user_lang(uid) if uid else "en"
+    except Exception:
+        title = "⚙️ Settings"
+        lang_hdr = "Language"
+        current = "en"
+    return f"*{title}*\n\n{lang_hdr}: `{current}`"
 
 
 def bottom_reply_keyboard(uid: Optional[int] = None) -> ReplyKeyboardMarkup:

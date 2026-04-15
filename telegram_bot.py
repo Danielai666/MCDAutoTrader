@@ -1240,6 +1240,57 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("No exchange connected.", reply_markup=back_keyboard())
 
+    # --- Settings submenu (UI-only: language for now, extensible) ---
+    elif data == "menu_settings":
+        try:
+            import panel as _panel
+            await query.edit_message_text(
+                _panel.build_settings_text(uid),
+                reply_markup=_panel.build_settings_keyboard(uid),
+                parse_mode="Markdown",
+            )
+            _panel.track_panel(uid, chat_id, query.message.message_id)
+        except Exception as e:
+            log.debug("menu_settings render failed: %s", e)
+            await query.edit_message_text("Settings", reply_markup=back_keyboard())
+
+    elif data in ("settings_lang_en", "settings_lang_fa"):
+        new_lang = "fa" if data == "settings_lang_fa" else "en"
+        try:
+            from i18n import set_user_lang, is_enabled as _i18n_enabled, t as _t
+            if not _i18n_enabled():
+                await query.edit_message_text(
+                    "i18n is disabled (FEATURE_I18N=false). Enable it on Railway and restart.",
+                    reply_markup=back_keyboard(),
+                )
+            else:
+                if set_user_lang(uid, new_lang):
+                    # Confirmation first (new language), then force-refresh the panel.
+                    import panel as _panel
+                    key = "lang_set_fa" if new_lang == "fa" else "lang_set_en"
+                    # Re-render the panel in-place with new-language grid labels.
+                    # Clear the hash so refresh_panel definitely fires an edit.
+                    tracked = _panel.get_panel(uid)
+                    if tracked:
+                        tracked["last_rendered_hash"] = ""
+                    await query.edit_message_text(
+                        _panel.build_panel_text(uid),
+                        reply_markup=_panel.build_panel_keyboard(uid),
+                        parse_mode="Markdown",
+                    )
+                    _panel.track_panel(uid, chat_id, query.message.message_id)
+                    # Also re-send the bottom ReplyKeyboard so labels update.
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=_t(uid, key),
+                        reply_markup=_panel.bottom_reply_keyboard(uid),
+                    )
+                else:
+                    await query.edit_message_text("Invalid language.", reply_markup=back_keyboard())
+        except Exception as e:
+            log.debug("settings_lang_* failed: %s", e)
+            await query.edit_message_text("Language switch failed.", reply_markup=back_keyboard())
+
     # --- Live dashboard finalization: clear Busy, record Last Action ---
     # Runs after every successful dispatch (flat if/elif chain — no early
     # returns after the rate-limit check). If an action raised, PTB's handler
