@@ -22,3 +22,4 @@ bot.db
 bot.db-*
 .venv_broken/
 env.
+RAILWAY_VARS.md
