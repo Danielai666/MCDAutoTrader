@@ -4,10 +4,15 @@
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Repository: `MCDAutoTrader`
 > Date: 2026-04-15
-> Total: 40 Python files, ~11,250 lines of code (including 748 lines of tests)
+> Total: 43 Python files, ~11,900 LOC (adds panel.py, i18n.py, trial.py)
 > Tests: 66 automated tests, all passing
-> Release: v1.0-rc1 (feature freeze — Go-Live Trust Mode). Live on Railway + Supabase.
-> Latest commit: `2906169` (perf tuning — lower score threshold, hidden div + ADX trigger gate)
+> Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel (UI work baseline). Live on Railway + Supabase.
+> Latest commit: `ef10fd4` (Trial Mode + bilingual EN/FA UI — UX layer only)
+>
+> Active feature flags (live):
+>   FEATURE_CONTROL_PANEL=true    — modern inline panel + bottom ReplyKeyboard
+>   FEATURE_TRIAL_MODE=false      — toggled off by user post-deploy (see §18.11)
+>   FEATURE_I18N=false            — toggled off by user post-deploy (see §18.11)
 
 ---
 
@@ -562,22 +567,141 @@ Multiple small environment corrections driven by real errors encountered during 
   - `feedback_vision_role.md` — vision is confirmation-only
   - (Preexisting architecture/pipeline memories still valid)
 
+### 18.8 Restore point before UI work
+
+Before touching UI surface, created immutable anchors on GitHub:
+
+- Tag `v1.1-pre-ui-panel` → commit `7065190`
+- Branch `backup/pre-ui-panel` → commit `7065190`
+
+Full restore path documented: `git reset --hard v1.1-pre-ui-panel && git push origin main --force-with-lease`. Railway auto-redeploys the old code. Partial cherry-pick path also documented for selectively rolling back.
+
+### 18.9 Hybrid control panel (UI-only, feature-flagged)
+
+User requested an "app-like" persistent control panel without breaking any existing feature. Flagged that "always at the bottom" is not possible in Telegram and proposed the only realistic approaches; user chose the **hybrid** design.
+
+**Design chosen:**
+- One inline panel message per user, edited in place (`edit_message_text`) for every navigation.
+- A `ReplyKeyboardMarkup` with `Menu` / `Status` / `Panic Stop` sits above the text input permanently (this is the ONLY widget in Telegram that stays at the bottom — it's not a message, it's an input-area attachment).
+- In-memory per-user state (no DB schema change); fallback to re-send if edit fails.
+- Gated behind `FEATURE_CONTROL_PANEL` (default `true`) for instant rollback via Railway env flip.
+
+**Implementation:**
+- **New `panel.py`** (~400 LOC): `PanelState` tracking, 10-row grid preserving every existing `callback_data`, dynamic header renderer, `bottom_reply_keyboard()`, `refresh_panel(bot, chat_id, uid)` with edit-in-place + send-fallback, `track_panel`/`clear_panel`/`track_last_signal` helpers.
+- **`telegram_bot.py` minimal touch-ups**: `main_menu_keyboard()` delegates to `panel.build_panel_keyboard()` when flag on (legacy layout preserved as `_legacy_main_menu_keyboard`); `/start` sends bottom keyboard + panel message and tracks message_id; `/menu` re-renders; `cmd_menu` callback uses panel text; `text_input_handler` routes literal "Menu"/"Status"/"Panic Stop" taps from the reply keyboard before the `PENDING_INPUT` check; `/done` (screenshot) refreshes panel after multi-chunk output so it surfaces below.
+- **Row layout** (every callback_data resolves to an existing handler — verified by grep coverage check):
+
+| Row | Buttons |
+|---|---|
+| 1 | 📊 Signal · 📈 Status · 💼 Positions |
+| 2 | ⚙️ Risk · 🤖 AI Card · 📉 Report |
+| 3 | 🔁 AutoTrade · 🧪 Mode · 🔌 Connect |
+| 4 | 📊 Backtest · 🔍 Analyze · 🧠 Insights |
+| 5 | 🛡 Guards · ⚠️ Risk Board · 🔥 Heatmap |
+| 6 | 🚨 PANIC · 👤 Account · 🧩 Admin |
+| 7 | 💰 Price · 💚 Health · 🚀 Go Live |
+| 8 | 🎨 Visuals · 🌐 Pairs · 🔍 Check |
+| 9 | 🛑 Sell Now · 📐 SL/TP/Trail · ❌ Cancel |
+| 10 | 🔌 Disconnect |
+
+**Commit:** `b0a7a99`. Live test confirmed panel renders cleanly with dynamic header, all buttons responsive.
+
+### 18.10 Live dashboard upgrade — toast feedback, Last Action, 3-state status, auto-refresh
+
+User wanted the panel to feel "alive and app-like" (§ "LIVE dynamic dashboard"). Pushed back on the naive "Processing..." text flash because it causes flicker on fast submenu toggles; chose Telegram-native `query.answer(text=...)` toasts instead.
+
+**Additions in `panel.py`:**
+- Per-user state tracking: `set_state(uid, 'healthy'|'busy'|'error')` + `get_state(uid)`.
+- `set_last_action(uid, text)` + timestamp for "Last Action: X (3s ago)" header line.
+- `CALLBACK_LABELS` dict + `label_for(callback_data)` — maps every dispatch case to a short human label for toasts + Last Action line. Unknown keys fall back to title-cased data.
+- `build_panel_text` now shows: `Open: N` trade count, directional emoji on Last Signal (📈 BUY / 📉 SELL / ⚠️ warn / ➖ none), Last Action with relative age, 3-state System indicator (`🟢 Healthy` / `🟡 Busy` / `🔴 Error` / `🔴 Kill Switch` / `🟡 Dry Run`).
+- **MD5 content-hash dedupe** in `refresh_panel` — unchanged panels skip the Telegram API call entirely. Prevents rate-limit burn and "message is not modified" error spam from the auto-refresh job.
+- `auto_refresh_all(bot)` background function: iterates every tracked panel, skips panels idle > 10 min (stale), dedupes by content hash, failsafe clears stuck busy state older than 30s.
+
+**Additions in `telegram_bot.py`:**
+- `button_callback` entry now calls `query.answer(text=f"⏳ {label}...")` — native Telegram toast (~64 char limit), non-blocking, no panel flicker.
+- Sets `panel.set_state(uid, 'busy')` at entry; finalization block after the last `elif` clears to `healthy` and records the Last Action via `panel.set_last_action()`.
+- `build_app` registers `panel_auto_refresh` job on PTB's `JobQueue`: `interval=45s`, `first=60s`, gated by `FEATURE_CONTROL_PANEL` at each tick.
+
+**Rate-limit math:** Per-user cost is one `edit_message_text` every 45s *only when content actually changed* (hash dedupe). With 1 active user, that's at most ~80 API calls/hour. For the Telegram Bot API's 30/s limit that's trivial.
+
+**Commit:** `57ec31d`. Verified with live screenshot showing `Mode: LIVE · AutoTrade: OFF · Pairs: BTC · System: 🟢 OK` and all 10 rows rendering cleanly in narrow viewport.
+
+### 18.11 Trial Mode + bilingual (EN/FA) UI
+
+User specced a conversion-funnel "Trial Mode" as a UX wrapper over existing paper trading, plus bilingual EN/FA UI. Flagged that in-memory trial state would lose everything on Railway restart (trials last 7–14 days), so proposed and used an **additive migration** — five new columns on the existing `users` table, zero logic files touched.
+
+**New files:**
+- **`i18n.py`** — `TEXT` dict (EN + FA), `t(uid, key)` translator, `get_user_lang`/`set_user_lang` with in-memory cache + DB-backed persistence. Feature-flag aware. Keys cover panel header, trial mode strings, system status, button labels (selective), report headers. Farsi translations hand-written; numbers/symbols kept in Latin digits inside Farsi strings per RTL-readability best practice.
+- **`trial.py`** — `TrialState` dataclass (active/start_ts/capital/target_days + day_elapsed/day_index properties), `TrialMetrics` (trades, wins, losses, realized_pnl, max_drawdown, profit_factor, equity, roi_pct, win_rate). Metrics computed from existing `trades` table filtered on `user_id + ts_open >= trial_start_ts`. `panel_block(uid)` renders the injectable header block. `render_status` / `render_report` / `render_summary` produce fully-localized bilingual text including a progress bar (`██░░░░░░░░`) and a verdict heuristic (good / mixed / bad) after ≥5 trades.
+
+**Storage migration (`storage.py`, both SQLite + PostgreSQL):**
+Additive only — safe, backward-compatible:
+```sql
+ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'en';
+ALTER TABLE users ADD COLUMN trial_active INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN trial_start_ts INTEGER DEFAULT 0;  -- BIGINT on PG
+ALTER TABLE users ADD COLUMN trial_capital REAL DEFAULT 0;      -- DOUBLE PRECISION on PG
+ALTER TABLE users ADD COLUMN trial_target_days INTEGER DEFAULT 14;
+```
+
+**Config flags:** `FEATURE_TRIAL_MODE` (default true), `FEATURE_I18N` (default true).
+
+**New commands in `telegram_bot.py`:**
+- `/lang en` | `/lang fa` — per-user language, persisted, cache-invalidated on set.
+- `/trial start <capital> [days]` — begin trial; sets `trade_mode='PAPER'`, `autotrade_enabled=1`, `capital_usd=<capital>`, stamps start timestamp. Default target 14 days, max 90.
+- `/trial status` — running time, equity, PnL, ROI, progress bar.
+- `/trial report` — recent closed trades (✅/❌/➖) + open positions.
+- `/trial summary` — full breakdown with verdict heuristic.
+- `/trial stop` — end without conversion.
+- `/trial go_live [confirm]` — two-step conversion gated by `LIVE_TRADE_ALLOWED_IDS`; on confirm flips `trade_mode='LIVE'` and kicks existing `reconcile_positions()`.
+
+**Panel integration (`panel.py`):**
+- Header labels now go through `_tr(uid, key, fallback)` helper which best-effort fetches via `i18n.t()` and falls back to English on any error.
+- When `trial_active`, injects a two-line block:
+  ```
+  Trial Progress: █████░░░░░ 6/14 days
+  Trial Capital: $1,000.00
+  ```
+  Localized label in Farsi: `پیشرفت آزمایشی: █████░░░░░ 6/14 روز`. Numbers stay Latin for scan-ability.
+- **Keyboard layout untouched** — no new buttons added per spec §7 "keep layout clean". Full button translation deferred (flagged to user as a known limitation).
+
+**Post-deploy user action (§18.11 follow-up, user message 2026-04-15):**
+User set `FEATURE_TRIAL_MODE=false` and `FEATURE_I18N=false` on Railway and restarted. Intentional rollback via the feature flags:
+- `/trial <anything>` now returns `"Trial Mode is disabled"`.
+- `trial.panel_block(uid)` returns `""` early (no trial lines injected).
+- `i18n.get_user_lang()` short-circuits to `'en'`; `t()` always returns English.
+- All 5 DB columns remain in place — harmless when not read/written.
+- Control panel, live dashboard upgrades, perf tuning, vision lock all still **active** (they're not gated by these flags).
+User did not report a bug. Most likely reason: keeping the burn-in observation surface minimal. Flags can be flipped back to `true` whenever desired; feature code is all deployed.
+
+**Commit:** `ef10fd4`.
+
 ---
 
-## 19. Current State Snapshot (2026-04-15)
+## 19. Current State Snapshot (2026-04-15 — end of Session 2)
 
 | Area | State |
 |---|---|
 | Deployment | Live on Railway, paper-trading burn-in |
-| Database | Supabase PG project `xlmtawchpgltesmteclj`, pooler on `us-west-2` |
+| Database | Supabase PG project `xlmtawchpgltesmteclj`, pooler on `us-west-2` (IPv4-compatible) |
 | Trading mode | `PAPER_TRADING=true`, `DRY_RUN_MODE=false` |
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
-| AI fusion | `local_only` (Claude/OpenAI keys present but not consulted for trade decisions) |
-| Vision | Enabled for `/analyze_screens`, advisory only, not in trade path |
-| Last tuning | Phase 2 perf tuning deployed (`2906169`) |
-| Open deferrals | Exit optimization (trailing/break-even/partial TP); unit-spec reconciliation with user |
+| AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
+| Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
+| Latest commit | `ef10fd4` (Trial Mode + bilingual UI, UX layer) |
+| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + bottom ReplyKeyboard + live dashboard (toast, Last Action, 3-state status, 45s auto-refresh) |
+| `FEATURE_TRIAL_MODE` | `false` (user-toggled post-deploy; code deployed but no-op) |
+| `FEATURE_I18N` | `false` (user-toggled post-deploy; English only) |
+| `FEATURE_SCREENSHOTS` | `true` |
+| `FEATURE_AI_FUSION` | `false` |
+| `FEATURE_HIDDEN_DIVERGENCE` | `true` (used by strategy trigger path) |
+| `FEATURE_ICHIMOKU` | `true` |
+| `FEATURE_MT5_BRIDGE` | `false` |
+| Restore anchors | Tag `v1.0-rc1`, tag `v1.1-pre-ui-panel`, branch `backup/pre-ui-panel` (all on GitHub) |
+| Open deferrals | Exit optimization (ATR-unit reconciliation with user); full button translation when bilingual re-enabled; signal dispatch → `panel.track_last_signal` wiring |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
-| Tests | 66 still passing locally via `unittest` (pytest not installed in venv) |
+| Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
 
 ---
 
@@ -586,6 +710,10 @@ Multiple small environment corrections driven by real errors encountered during 
 1. **Observe Phase 2 tuning live** — watch trade frequency and PF over several days of paper trading. Collect: trades/day, win rate, PF, avg R, % of trades fired by TRIGGER vs score path.
 2. **If under-trading persists:** consider loosening ADX filter upper bound (45 → 50) or hidden-div bar (0.75 → 0.70).
 3. **If over-trading / PF drops:** raise non-trigger threshold back toward 1.3–1.4 before touching the trigger itself.
-4. **Exit optimization phase** — after 18.5 results are clear, reopen discussion on trailing / break-even / partial TP using ATR-multiple units (not R-multiples).
-5. **Security rotation sweep** once burn-in passes.
+4. **Exit optimization phase** — after §18.5 results are clear, reopen discussion on trailing / break-even / partial TP using **ATR-multiple units** (not R-multiples; 1 R = 1.5 ATR in this system).
+5. **Security rotation sweep** once burn-in passes (Supabase PW, Telegram token, Fernet key, OpenAI key).
+6. **Panel polish (low priority):**
+   - Wire `panel.track_last_signal(uid, direction, score, conf)` into the scheduler's signal dispatch so the header's `Last Signal` line populates automatically (currently stays `—` until a signal is recorded by a caller).
+   - If user re-enables `FEATURE_I18N`, consider full button-label translation (flagged as deferred in §18.11).
+7. **Trial Mode readiness:** feature is fully implemented and deployed but flag-gated off. To activate: set `FEATURE_TRIAL_MODE=true` on Railway. `/trial start 1000` begins a 14-day paper run with the documented UX.
 
