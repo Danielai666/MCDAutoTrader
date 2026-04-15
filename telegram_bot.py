@@ -1952,11 +1952,21 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await analyze_screenshots(session)
         text = format_analysis_result(result)
 
-        # Truncate if too long for Telegram
-        if len(text) > 4000:
-            text = text[:3950] + "\n...(truncated)"
-
-        await msg.edit_text(text, reply_markup=back_keyboard())
+        # Telegram message max is 4096 chars. Split if too long.
+        CHUNK = 3800
+        if len(text) <= CHUNK:
+            await msg.edit_text(text, reply_markup=back_keyboard())
+        else:
+            await msg.edit_text(text[:CHUNK])
+            # Send remaining as follow-up messages
+            remaining = text[CHUNK:]
+            while remaining:
+                part = remaining[:CHUNK]
+                remaining = remaining[CHUNK:]
+                if not remaining:
+                    await update.effective_chat.send_message(part, reply_markup=back_keyboard())
+                else:
+                    await update.effective_chat.send_message(part)
     except Exception as e:
         log.error("Screenshot analysis failed: %s", e)
         await msg.edit_text(f"Analysis failed: {e}", reply_markup=back_keyboard())

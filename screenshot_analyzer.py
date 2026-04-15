@@ -207,7 +207,7 @@ async def _analyze_with_claude(images: list) -> Optional[dict]:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(None, lambda: client.messages.create(
             model=SETTINGS.SCREENSHOT_VISION_MODEL,
-            max_tokens=2000,
+            max_tokens=4000,
             messages=[{"role": "user", "content": content}],
         ))
 
