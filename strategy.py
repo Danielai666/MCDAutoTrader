@@ -199,6 +199,28 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
     if buy_score >= 1.5 and buy_score > sell_score: direction = 'BUY'
     elif sell_score >= 1.5 and sell_score > buy_score: direction = 'SELL'
 
+    # --- Strong divergence trigger (only overrides HOLD, never flips direction) ---
+    # A high-strength regular divergence with candle confirmation is itself
+    # a valid setup even if total score is below the 1.5 threshold.
+    if direction == 'HOLD':
+        DIV_TRIGGER_STR = 0.7  # high bar — only clear divergence triggers
+        strong_bull_div = (md_type == 'bullish' and md_str >= DIV_TRIGGER_STR) or \
+                          (rd_type == 'bullish' and rd_str >= DIV_TRIGGER_STR)
+        strong_bear_div = (md_type == 'bearish' and md_str >= DIV_TRIGGER_STR) or \
+                          (rd_type == 'bearish' and rd_str >= DIV_TRIGGER_STR)
+
+        candle_bull = bool(candle_summary and candle_summary.get('net_score', 0) > 0.2)
+        candle_bear = bool(candle_summary and candle_summary.get('net_score', 0) < -0.2)
+
+        if strong_bull_div and candle_bull and sell_score < 1.5:
+            direction = 'BUY'
+            score = max(score, 1.5)
+            reasons.append('TRIGGER: strong bull divergence + candle confirm')
+        elif strong_bear_div and candle_bear and buy_score < 1.5:
+            direction = 'SELL'
+            score = min(score, -1.5)
+            reasons.append('TRIGGER: strong bear divergence + candle confirm')
+
     return _build_result(
         direction, score, ', '.join(reasons),
         close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,

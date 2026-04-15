@@ -246,6 +246,18 @@ def _local_heuristic(features: dict) -> AIDecision:
     elif d == 'SELL' and avg_rsi < 25:
         conf -= 0.10; risk_flags.append(f'RSI oversold {avg_rsi:.0f}')
 
+    # Decisiveness boost when a per-TF divergence trigger fired.
+    # The trigger is a high-bar signal (strong divergence + candle confirm)
+    # so we give it a small confidence bump to avoid gating it out.
+    triggered = False
+    for tf, sig in by_tf.items():
+        if 'TRIGGER:' in str(sig.get('reasons', '')):
+            triggered = True
+            break
+    if triggered:
+        conf += 0.05
+        reasons.append('Divergence trigger fired')
+
     conf = max(0.0, min(1.0, conf))
 
     # Decision
