@@ -128,6 +128,8 @@ def main_menu_keyboard():
          InlineKeyboardButton("🎨 Visuals", callback_data="cmd_visuals")],
         [InlineKeyboardButton("🧠 AI Card", callback_data="cmd_ai_card"),
          InlineKeyboardButton("⚙️ My Account", callback_data="cmd_myaccount")],
+        [InlineKeyboardButton("📸 Analyze Charts", callback_data="cmd_analyze_screens"),
+         InlineKeyboardButton("🔗 Connect Exchange", callback_data="cmd_connect")],
         [InlineKeyboardButton("💚 Health Stats", callback_data="cmd_health_stats"),
          InlineKeyboardButton("🚀 Go Live", callback_data="cmd_golive")],
         [InlineKeyboardButton("🆘 PANIC STOP", callback_data="cmd_panic_stop")],
@@ -1058,6 +1060,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cmd_visuals":
         await query.edit_message_text("Use /visuals command to open visual settings",
                                       reply_markup=back_keyboard())
+
+    elif data == "cmd_analyze_screens":
+        if not SETTINGS.FEATURE_SCREENSHOTS:
+            await query.edit_message_text(
+                "Screenshot analysis is disabled.\n\n"
+                "To enable: set FEATURE_SCREENSHOTS=true in Railway and add "
+                "CLAUDE_API_KEY or OPENAI_API_KEY, then redeploy.",
+                reply_markup=back_keyboard())
+            return
+        # Check AI key availability
+        if not (SETTINGS.CLAUDE_API_KEY or SETTINGS.OPENAI_API_KEY):
+            await query.edit_message_text(
+                "Screenshot analysis needs an AI vision key.\n"
+                "Set CLAUDE_API_KEY or OPENAI_API_KEY in Railway and redeploy.",
+                reply_markup=back_keyboard())
+            return
+        from screenshot_analyzer import start_session
+        start_session(uid, chat_id)
+        await query.edit_message_text(
+            f"Screenshot session started.\n\n"
+            f"Send up to {SETTINGS.SCREENSHOT_MAX_IMAGES} chart images, then type /done to analyze.\n"
+            f"Session expires in 10 minutes.",
+            reply_markup=back_keyboard())
 
     # --- Manual confirm trade execution ---
     elif data.startswith("confirm_trade_"):
