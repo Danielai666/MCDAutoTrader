@@ -4,15 +4,16 @@
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Repository: `MCDAutoTrader`
 > Date: 2026-04-15
-> Total: 43 Python files, ~11,900 LOC (adds panel.py, i18n.py, trial.py)
+> Total: 44 Python files, ~12,500 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel (UI work baseline). Live on Railway + Supabase.
-> Latest commit: `ef10fd4` (Trial Mode + bilingual EN/FA UI — UX layer only)
+> Latest commit: `f204963` (Portfolio upgrade — true equity, open positions, unrealized PnL, reconciliation, real-trade report)
 >
 > Active feature flags (live):
->   FEATURE_CONTROL_PANEL=true    — modern inline panel + bottom ReplyKeyboard
->   FEATURE_TRIAL_MODE=false      — toggled off by user post-deploy (see §18.11)
->   FEATURE_I18N=false            — toggled off by user post-deploy (see §18.11)
+>   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
+>   FEATURE_TRIAL_MODE=false      — user-toggled off (§18.11)
+>   FEATURE_I18N=false            — user-toggled off (§18.11, §18.12)
+>   FEATURE_PORTFOLIO=false       — user-toggled off (§18.14)
 
 ---
 
@@ -677,6 +678,121 @@ User did not report a bug. Most likely reason: keeping the burn-in observation s
 
 **Commit:** `ef10fd4`.
 
+### 18.12 i18n completion — full button localization + Settings submenu
+
+User caught that the previous i18n commit (`ef10fd4`) only translated panel **header labels**, not button labels. I had flagged this as deferred at the time ("button labels stayed language-neutral for symmetry"). User asked me to finish the job, which was fair — typing `/lang fa` is developer ergonomics, not user ergonomics.
+
+**Phase A — full button translation (`01e18ca`):**
+- Added 28 `btn_*` keys + 3 `rk_*` keys to both `en` and `fa` dicts in `i18n.py`. Every inline grid button + the persistent bottom ReplyKeyboard labels now have Farsi translations (kept short for grid fit).
+- `panel.build_panel_keyboard(uid=None)` and `panel.bottom_reply_keyboard(uid=None)` now accept `uid` and localize every label via a new `_btn(uid, key, fallback)` helper with safe English fallback.
+- `panel.refresh_panel()` passes `uid` to keyboard builder so auto-refresh ticks render in the user's language.
+- `main_menu_keyboard(uid=None)` in `telegram_bot.py` passes `uid` through.
+- `/start`, `/menu`, and the `cmd_menu` callback now pass `uid` explicitly.
+- `text_input_handler` accepts Farsi ReplyKeyboard labels (`منو`, `وضعیت`, `توقف`, `توقف اضطراری`) so tapping the Farsi button routes to the same handler as the English one.
+- New `/farsi` command as a shortcut alias for `/lang fa`.
+- New `/langtest` diagnostic command (current language + `FEATURE_I18N` state + 7 sample keys).
+- `/lang` now forces immediate refresh: clears panel content-hash, re-renders inline panel in-place with new-language labels, re-sends the bottom ReplyKeyboard so its labels take effect.
+
+**Phase B — Settings submenu (`1e2d262`):**
+- User asked "why not add a settings option?" after seeing the i18n result. Fair UX critique — real apps don't require slash commands for common settings.
+- Added `⚙️ Settings` button to row 10 of the main panel (was solo `🔌 Disconnect` — now `⚙️ Settings · 🔌 Disconnect`).
+- Settings submenu: `🇬🇧 English`, `🇮🇷 فارسی`, `⬅️ Back`.
+- New callbacks `menu_settings`, `settings_lang_en`, `settings_lang_fa` wired into `button_callback` with the same force-refresh pattern as `/lang`.
+- Added 6 new i18n keys in both locales (`btn_settings`, `settings_title`, `settings_language_header`, `btn_lang_en`, `btn_lang_fa`, `btn_back`).
+- Added 3 new entries to `panel.CALLBACK_LABELS` so the Last Action line + toast show the right text when Settings / Language buttons are tapped.
+- Designed as extensible: future settings (timezone, notifications, trial toggle, default pair) slot into the same submenu without bloating the main grid.
+
+**Feature state:** `FEATURE_I18N=false` per user choice (§18.11). Commands and buttons exist but the "i18n disabled" guardrail message shows when users try to switch language. Flag can be flipped back on Railway to activate.
+
+### 18.13 Portfolio v1 — read-only exchange reporting
+
+User specced a safe read-only portfolio view for connected exchange accounts. Hard scope rules: only fetch calls, no order placement / cancellation / mutation.
+
+**New `portfolio.py` (~290 LOC):**
+- `PortfolioSnapshot` / `Asset` / `PerformanceReport` dataclasses.
+- `async fetch_portfolio(uid, force=False)` — async wrapper around CCXT `fetch_balance`. Runs sync CCXT calls in an executor so the event loop never blocks.
+- Per-user snapshot cache with 60s TTL — the panel auto-refresh at 45s stays inside this window so no additional exchange API load from the panel.
+- Per-ticker price cache with 30s TTL.
+- Stablecoins (USD/USDT/USDC/BUSD/DAI/TUSD/USDP/FDUSD) valued 1:1; non-stable assets priced via `fetch_ticker` against USDT → USD → USDC fallback chain.
+- Dust filter: assets < $0.01 hidden.
+- `compute_report(uid, window_days)` — realized PnL / ROI / trades / wins / losses / best / worst — all from the existing `trades` table filtered on `user_id + ts_close` window. Zero exchange API cost.
+- `format_portfolio` / `format_report` — bilingual via i18n, Markdown-safe output.
+- `panel_summary(uid)` — single-line summary read from **cache only** (never triggers a fetch). Empty until user runs `/portfolio` once.
+
+**New `/portfolio` command:**
+- `/portfolio` — live snapshot (force=True, cache bypass)
+- `/portfolio report 7d | 30d | <days>` — local-trades performance window
+- "Fetching..." placeholder edited in-place with the result for loading feedback.
+
+**i18n:** 19 `portfolio_*` keys added to both `en` and `fa` dicts.
+
+**Config:** `FEATURE_PORTFOLIO=true` (default).
+
+**Panel integration:** single line injected after System status when the cache is warm (empty otherwise so panel stays clean for paper users).
+
+**Safety audit:**
+- No order / cancel / edit calls — grep-verified across `portfolio.py`.
+- All CCXT calls inside `asyncio.run_in_executor` — non-blocking.
+- CCXT client initialized with `enableRateLimit=True` (already in `CCXTProvider`).
+- Graceful `NO_EXCHANGE` path for paper-only users.
+- Credentials decrypted via existing `crypto_utils` (V1 + V2), never logged.
+
+**Commit:** `636b1f4`.
+
+### 18.14 Portfolio upgrade — true equity, open positions, unrealized PnL, reconciliation, real-trade report
+
+User specced a professional trading-grade upgrade. Four real-world caveats flagged up-front because they shaped the implementation:
+
+1. **Kraken is spot — no native "positions" concept.** CCXT `fetch_positions()` returns empty on spot exchanges. Primary source for unrealized PnL had to be the bot's internal `trades` table (where entry prices actually live), with `fetch_positions()` as a bonus path only for derivatives venues.
+2. **Reconciliation on spot is noisy.** Users may hold pre-existing balances unrelated to the bot. Scoping the check to *only symbols where the bot has OPEN trades* and only flagging *under-balance* (not over-balance) prevents false alarms.
+3. **`fetch_my_trades` varies per exchange.** Rate limits + pagination differ. Added 5-minute per-user result cache + 365-day window cap + executor wrap.
+4. **Real PnL from fills is not trivially FIFO-accurate.** Did simplified per-symbol buy-cost vs sell-proceeds aggregation minus fees. UI explicitly labels output as "Real trade history (approx.)" so users aren't misled.
+
+**New data model:**
+- `OpenPosition` dataclass: `symbol`, `side`, `size`, `entry_price`, `current_price`, `unrealized_pnl`, `unrealized_pct`, `source` ('bot' | 'exchange').
+- `PortfolioSnapshot` extended with: `unrealized_pnl`, `true_equity`, `open_positions: List[OpenPosition]`, `reconcile_warning: str`.
+
+**`_collect_open_positions` logic:**
+- Pull every OPEN trade for the user from `trades` table (has entry price + qty).
+- Fetch current ticker for each pair → compute unrealized PnL = `(current - entry) × qty` for BUY, inverted for SELL. Store with `source='bot'` and 🤖 glyph.
+- If `client.has['fetchPositions']`, also fetch exchange-side positions (derivatives) and append with `source='exchange'` and 📊 glyph.
+
+**`_reconcile_check` logic:**
+- Group bot's OPEN BUY trades by pair → sum expected qty per asset.
+- For each asset the bot has OPEN trades on, compare to exchange's total balance of that asset (from `fetch_balance`).
+- Flag when `have < expected × 0.99` (1% drift tolerance for fees/rounding).
+- Does **not** flag untracked balances on other assets (would cry wolf on every spot user).
+- Output: "`⚠️ Sync mismatch: BTC: bot expects 0.010000, exchange has 0.005000`" rendered in the portfolio view.
+- Does **not** duplicate `reconcile.py`'s system-wide check — `reconcile.py` is global and admin-facing; this is per-user and UI-facing.
+
+**Real trade history (`/portfolio report real [days]`):**
+- `async compute_report_real(uid, window_days)` — uses CCXT `fetch_my_trades(since=window_start_ms, limit=500)`.
+- Per-symbol aggregation: `min(buy_qty, sell_qty)` = realized qty; PnL = `(avg_sell - avg_buy) × realized_qty - fees`.
+- Returns standard `PerformanceReport` — reuses `format_report` with "_(approx.)_" prefix.
+- Default window 30 days (vs 7 for local report), max 365.
+- 5-minute per-user result cache to protect exchange API quotas.
+
+**UI fixes:**
+- Added `_signed_money(v)` helper. Old code rendered `$-10.00` and `++3.86%` for negatives due to formatter double-signing. New helper puts sign outside the `$`: `+$12.30`, `-$5.00`, `$0.00`.
+
+**Panel summary now 2 lines** when portfolio cache is warm:
+```
+Portfolio: $1,512.34   PnL: +0.82% (1d)
+Unrealized: +$23.50
+```
+Still read-from-cache-only — never triggers a fetch. Empty when cache cold or user has NO_EXCHANGE / ERROR state.
+
+**i18n:** 6 new keys in both locales (`portfolio_equity`, `portfolio_unrealized`, `portfolio_unrealized_short`, `portfolio_open_positions`, `portfolio_no_open`, `portfolio_real_label`).
+
+**Safety audit (still clean):**
+- Every new CCXT call is read-only: `fetch_positions`, `fetch_my_trades`, `fetch_ticker`, `fetch_balance`. Grep-verified no `create_order` / `cancel_order` / `edit_order` / `transfer` anywhere in `portfolio.py`.
+- All calls inside executor (non-blocking).
+- 60s snapshot cache + 30s ticker cache + 5-min real-report cache — bounded API load under worst-case user activity.
+
+**Post-deploy user action:** user set `FEATURE_PORTFOLIO=false` on Railway. Intentional flag rollback (same pattern as §18.11 for Trial + i18n). All code deployed, `/portfolio` replies "disabled" until flag is flipped back.
+
+**Commits:** `636b1f4` (v1), `f204963` (upgrade).
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -689,17 +805,18 @@ User did not report a bug. Most likely reason: keeping the burn-in observation s
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `ef10fd4` (Trial Mode + bilingual UI, UX layer) |
-| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + bottom ReplyKeyboard + live dashboard (toast, Last Action, 3-state status, 45s auto-refresh) |
+| Latest commit | `f204963` (portfolio upgrade — true equity, open positions, unrealized PnL, reconciliation, real-trade report) |
+| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu (⚙️ Settings → language picker, extensible) |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled post-deploy; code deployed but no-op) |
-| `FEATURE_I18N` | `false` (user-toggled post-deploy; English only) |
+| `FEATURE_I18N` | `false` (user-toggled post-deploy; English only; Farsi translations ready) |
+| `FEATURE_PORTFOLIO` | `false` (user-toggled post-deploy; `/portfolio` replies "disabled") |
 | `FEATURE_SCREENSHOTS` | `true` |
 | `FEATURE_AI_FUSION` | `false` |
 | `FEATURE_HIDDEN_DIVERGENCE` | `true` (used by strategy trigger path) |
 | `FEATURE_ICHIMOKU` | `true` |
 | `FEATURE_MT5_BRIDGE` | `false` |
 | Restore anchors | Tag `v1.0-rc1`, tag `v1.1-pre-ui-panel`, branch `backup/pre-ui-panel` (all on GitHub) |
-| Open deferrals | Exit optimization (ATR-unit reconciliation with user); full button translation when bilingual re-enabled; signal dispatch → `panel.track_last_signal` wiring |
+| Open deferrals | Exit optimization (ATR-unit reconciliation with user); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle) |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
 | Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
 
@@ -714,6 +831,9 @@ User did not report a bug. Most likely reason: keeping the burn-in observation s
 5. **Security rotation sweep** once burn-in passes (Supabase PW, Telegram token, Fernet key, OpenAI key).
 6. **Panel polish (low priority):**
    - Wire `panel.track_last_signal(uid, direction, score, conf)` into the scheduler's signal dispatch so the header's `Last Signal` line populates automatically (currently stays `—` until a signal is recorded by a caller).
-   - If user re-enables `FEATURE_I18N`, consider full button-label translation (flagged as deferred in §18.11).
-7. **Trial Mode readiness:** feature is fully implemented and deployed but flag-gated off. To activate: set `FEATURE_TRIAL_MODE=true` on Railway. `/trial start 1000` begins a 14-day paper run with the documented UX.
+   - Full button-label translation is now done (§18.12) — when `FEATURE_I18N` is re-enabled, the entire grid + bottom ReplyKeyboard + Settings submenu all localize.
+7. **Trial Mode readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_TRIAL_MODE=true` on Railway. `/trial start 1000` begins a 14-day paper run.
+8. **i18n readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_I18N=true`. Then `/lang fa` or tap ⚙️ Settings → 🇮🇷 فارسی for instant Farsi UI across panel header + all buttons + bottom ReplyKeyboard.
+9. **Portfolio readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_PORTFOLIO=true`. Commands: `/portfolio` for live snapshot, `/portfolio report 7d|30d|<days>` for local-trades PnL, `/portfolio report real [days]` for exchange fetch_my_trades PnL (approximate). Read-only guarantees audited in code (no order/cancel/edit calls anywhere in `portfolio.py`).
+10. **Three dormant features, one active tuning observation:** all recent feature work (Trial, i18n, Portfolio) is deployed but flagged off at user's request. The live surface during burn-in is the control panel + existing trading loop + Phase 2 perf tuning. Flip any single flag to `true` on Railway to activate without code changes.
 
