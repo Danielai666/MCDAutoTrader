@@ -2344,6 +2344,67 @@ async def trial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_t(uid, "trial_usage"))
 
 
+# ---------------------------
+# Portfolio (READ-ONLY — no trading actions)
+# ---------------------------
+async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage:
+       /portfolio                — live snapshot
+       /portfolio report 7d      — 7-day performance
+       /portfolio report 30d     — 30-day performance
+    """
+    uid = update.effective_user.id
+    try:
+        import portfolio as _pf
+        from i18n import t as _t
+    except Exception as e:
+        log.error("portfolio import failed: %s", e)
+        await update.message.reply_text("Portfolio module unavailable.")
+        return
+
+    if not _pf.is_enabled():
+        await update.message.reply_text("Portfolio is disabled (FEATURE_PORTFOLIO=false).")
+        return
+
+    args = context.args or []
+
+    # Report subcommand
+    if args and args[0].lower() == "report":
+        days = 7
+        if len(args) >= 2:
+            raw = args[1].lower().rstrip("d")
+            try:
+                days = max(1, min(365, int(raw)))
+            except ValueError:
+                days = 7
+        report = _pf.compute_report(uid, window_days=days)
+        await update.message.reply_text(
+            _pf.format_report(uid, report),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    # Live snapshot
+    placeholder = await update.message.reply_text(_t(uid, "portfolio_fetching"))
+    try:
+        snap = await _pf.fetch_portfolio(uid, force=True)
+        text = _pf.format_portfolio(uid, snap)
+        try:
+            await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+        except Exception:
+            # Placeholder edit failed (rare); send fresh
+            await update.effective_chat.send_message(
+                text, parse_mode="Markdown", reply_markup=back_keyboard()
+            )
+    except Exception as e:
+        log.error("portfolio_cmd fetch failed: %s", e)
+        try:
+            await placeholder.edit_text(f"Portfolio error: {e}", reply_markup=back_keyboard())
+        except Exception:
+            pass
+
+
 async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Run exchange reconciliation. Usage: /reconcile [fix]"""
     uid = update.effective_user.id
@@ -2516,6 +2577,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("lang", rate_limited(lang_cmd)))
     app.add_handler(CommandHandler("farsi", rate_limited(farsi_cmd)))
     app.add_handler(CommandHandler("langtest", rate_limited(langtest_cmd)))
+
+    # --- Portfolio (read-only exchange reporting) ---
+    app.add_handler(CommandHandler("portfolio", rate_limited(portfolio_cmd)))
 
     # --- Screenshot analysis ---
     app.add_handler(CommandHandler("analyze_screens", rate_limited(analyze_screens_cmd)))

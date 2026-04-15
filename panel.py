@@ -455,6 +455,18 @@ def build_panel_text(uid: int) -> str:
     except Exception:
         pass
 
+    # Portfolio summary (cache-only — never triggers a fetch).
+    # Stays empty until the user runs /portfolio once; then shows while
+    # the 60s snapshot cache is warm.
+    portfolio_line = ""
+    try:
+        import portfolio as _pf
+        summary = _pf.panel_summary(uid)
+        if summary:
+            portfolio_line = f"\n{summary}"
+    except Exception:
+        pass
+
     return (
         f"*{title}*\n"
         f"{mode_lbl}: `{mode}`   {at_lbl}: `{autotrade_label}`   {open_lbl}: `{open_n}`\n"
@@ -462,6 +474,7 @@ def build_panel_text(uid: int) -> str:
         f"{sig_lbl}: {last_sig}\n"
         f"{last_action_line}\n"
         f"{status}"
+        f"{portfolio_line}"
         f"{trial_block}\n\n"
         f"{select_lbl}"
     )
