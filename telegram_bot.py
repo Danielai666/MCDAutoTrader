@@ -34,30 +34,102 @@ LAST_NOTIFY = {}
 NOTIFY_COOLDOWN = 300
 
 # ---------------------------
-# Rate limiter
+# Rate limiter (dual-window: burst + volume)
 # ---------------------------
+# Per-user timestamp rings. Widest window retained so both checks share data.
 _rate_limits: dict = {}  # uid -> list of timestamps
 
-def _check_rate_limit(uid: int, limit: int = 10, window: int = 60) -> bool:
-    """Returns True if allowed, False if rate limited."""
+def _check_rate_limit(uid: int, limit: int = None, window: int = None) -> bool:
+    """Returns True if allowed, False if either rate-limit window is exceeded.
+
+    Two windows enforced simultaneously (configurable via env):
+      - Burst:  RATE_LIMIT_BURST_COUNT  in RATE_LIMIT_BURST_WINDOW  (default 5/10s)
+      - Volume: RATE_LIMIT_WINDOW_COUNT in RATE_LIMIT_WINDOW_SECONDS (default 10/60s)
+
+    Legacy call shape `_check_rate_limit(uid, limit, window)` is still honored
+    (short-circuits to the single-window check) so existing call sites don't
+    regress. New call sites can call it without args for full dual-window.
+    """
     now = time.time()
     times = _rate_limits.setdefault(uid, [])
-    times[:] = [t for t in times if now - t < window]
-    if len(times) >= limit:
+
+    # Legacy single-window path (existing call sites)
+    if limit is not None and window is not None:
+        times[:] = [t for t in times if now - t < window]
+        if len(times) >= limit:
+            return False
+        times.append(now)
+        return True
+
+    # Dual-window path
+    burst_n = SETTINGS.RATE_LIMIT_BURST_COUNT
+    burst_w = SETTINGS.RATE_LIMIT_BURST_WINDOW
+    vol_n = SETTINGS.RATE_LIMIT_WINDOW_COUNT
+    vol_w = SETTINGS.RATE_LIMIT_WINDOW_SECONDS
+    # Trim to the wider of the two windows
+    widest = max(burst_w, vol_w)
+    times[:] = [t for t in times if now - t < widest]
+    burst_count = sum(1 for t in times if now - t < burst_w)
+    vol_count = len(times)  # already trimmed to widest
+    if burst_count >= burst_n:
+        return False
+    if vol_count >= vol_n:
         return False
     times.append(now)
     return True
 
+
 def rate_limited(func):
-    """Decorator: applies per-user rate limiting to command handlers."""
+    """Decorator: applies per-user dual-window rate limiting to handlers."""
     async def wrapper(update: Update, context):
         uid = update.effective_user.id
         if not _check_rate_limit(uid):
-            await update.message.reply_text("Rate limit exceeded. Try again shortly.")
+            await update.message.reply_text("Too many requests, slow down.")
             return
         return await func(update, context)
     wrapper.__name__ = func.__name__
     return wrapper
+
+
+# ---------------------------
+# Exchange-error wrapper (clean user-facing errors)
+# ---------------------------
+def _safe_exchange_error(e: Exception) -> str:
+    """Convert a raw CCXT / network exception into a clean user message.
+    Specific types are checked before their parents (ccxt's exception tree
+    has RateLimitExceeded <- NetworkError, ExchangeNotAvailable <- NetworkError)."""
+    try:
+        import ccxt
+        if isinstance(e, ccxt.RateLimitExceeded):
+            return "Exchange rate limit reached, try again shortly."
+        if isinstance(e, ccxt.AuthenticationError):
+            return "Exchange auth failed. Use Connect to re-link your keys."
+        if isinstance(e, ccxt.ExchangeNotAvailable):
+            return "Exchange temporarily unavailable."
+        if isinstance(e, ccxt.NetworkError):
+            return "Exchange unreachable, try again in a moment."
+        if isinstance(e, ccxt.ExchangeError):
+            return "Exchange error, try again later."
+    except Exception:
+        pass
+    return "Network or exchange error, try again later."
+
+
+# ---------------------------
+# MAX_ACTIVE_USERS soft cap
+# ---------------------------
+def _is_over_user_cap() -> bool:
+    """True when the total registered users exceeds MAX_ACTIVE_USERS.
+    Called on /start to steer new users to paper-only safely."""
+    try:
+        cap = SETTINGS.MAX_ACTIVE_USERS
+        if cap <= 0:
+            return False
+        row = fetchone("SELECT COUNT(*) FROM users")
+        cur = int(row[0]) if row and row[0] is not None else 0
+        return cur >= cap
+    except Exception:
+        return False
 
 # ---------------------------
 # Connect exchange state machine
@@ -1460,7 +1532,30 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uname = update.effective_user.username or ""
+    # Check soft cap BEFORE inserting. If full, still let them register but
+    # force PAPER + autotrade off + no live-mode eligibility.
+    over_cap = _is_over_user_cap()
+    # Note: if the user already exists, upsert_user updates their row in-place
+    # and the cap check is effectively ignored for them (only affects brand-new
+    # registrations at the edge of the cap).
     upsert_user(uid, uname, int(time.time()))
+    if over_cap:
+        try:
+            execute(
+                "UPDATE users SET trade_mode='PAPER', autotrade_enabled=0 WHERE user_id=?",
+                (uid,),
+            )
+        except Exception:
+            pass
+        log.info("Soft cap reached (%d users) — new user %s forced to paper",
+                 SETTINGS.MAX_ACTIVE_USERS, uid)
+        try:
+            await update.message.reply_text(
+                f"⚠️ User capacity reached ({SETTINGS.MAX_ACTIVE_USERS} active). "
+                f"You can use paper trading; live trading is disabled for new users."
+            )
+        except Exception:
+            pass
     try:
         import panel as _panel
         if _panel.is_enabled():
@@ -2380,9 +2475,9 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text, parse_mode="Markdown", reply_markup=back_keyboard()
                 )
             except Exception as e:
-                log.error("portfolio real report failed: %s", e)
+                log.error("portfolio real report failed uid=%s: %s", uid, e)
                 try:
-                    await placeholder.edit_text(f"Real report error: {e}", reply_markup=back_keyboard())
+                    await placeholder.edit_text(_safe_exchange_error(e), reply_markup=back_keyboard())
                 except Exception:
                     pass
             return
@@ -2411,14 +2506,14 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
         except Exception:
-            # Placeholder edit failed (rare); send fresh
             await update.effective_chat.send_message(
                 text, parse_mode="Markdown", reply_markup=back_keyboard()
             )
     except Exception as e:
-        log.error("portfolio_cmd fetch failed: %s", e)
+        log.error("portfolio_cmd fetch failed uid=%s: %s", uid, e)
+        clean = _safe_exchange_error(e)
         try:
-            await placeholder.edit_text(f"Portfolio error: {e}", reply_markup=back_keyboard())
+            await placeholder.edit_text(clean, reply_markup=back_keyboard())
         except Exception:
             pass
 

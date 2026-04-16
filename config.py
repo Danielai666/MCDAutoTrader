@@ -47,6 +47,13 @@ class Settings:
     FEATURE_I18N: bool = _bool('FEATURE_I18N', 'true')
     FEATURE_PORTFOLIO: bool = _bool('FEATURE_PORTFOLIO', 'true')
 
+    # --- Production safety layer ---
+    MAX_ACTIVE_USERS: int = int(os.getenv('MAX_ACTIVE_USERS', '20'))
+    RATE_LIMIT_BURST_COUNT: int = int(os.getenv('RATE_LIMIT_BURST_COUNT', '5'))
+    RATE_LIMIT_BURST_WINDOW: int = int(os.getenv('RATE_LIMIT_BURST_WINDOW', '10'))
+    RATE_LIMIT_WINDOW_COUNT: int = int(os.getenv('RATE_LIMIT_WINDOW_COUNT', '10'))
+    RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv('RATE_LIMIT_WINDOW_SECONDS', '60'))
+
     # --- Market / Exchange ---
     EXCHANGE: str = os.getenv('EXCHANGE', 'kraken')
     PAIR: str = os.getenv('PAIR', 'BNB/USDC')
