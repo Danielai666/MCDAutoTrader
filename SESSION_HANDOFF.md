@@ -959,6 +959,35 @@ Added best-effort `touch_user(uid)` calls at entry to both handlers. Every user-
 
 **Commit:** `1c21fd7`.
 
+### 18.19 Trial Mode activation-readiness — runtime verification (no code changes)
+
+User invoked controlled feature expansion: "implement Trial Mode". Honest answer: already fully built in §18.11 (commit `ef10fd4`) and sitting dormant behind `FEATURE_TRIAL_MODE=false`. Subsequent stabilization work (§18.17 safety v2, §18.18 handler wrapping) automatically extended coverage to `/trial` via the `rate_limited` decorator — it now gets dual-window rate limiting, `touch_user` tracking, and `telemetry.record_command` for free.
+
+Rather than re-implement, ran **end-to-end runtime simulation** against an in-memory SQLite DB to prove the wrapper actually works with live data, not just static imports:
+
+**9 runtime checks — all passed:**
+1. `start_trial(uid, 1000, 14)` — sets `users.trial_active=1`, `trial_capital=1000`, `trial_target_days=14`, `capital_usd=1000`, `trade_mode='PAPER'`, `autotrade_enabled=1`
+2. `get_trial(uid)` returns correct `TrialState`
+3. Insert 5 closed trades + 1 open position WITHIN trial window → `compute_metrics` returns trades=6, wins=3, losses=2, PnL=$32.00, win_rate=60%, profit_factor=4.76, equity=$1032
+4. Insert 1 "ghost" trade BEFORE `trial_start_ts` → window filter correctly excludes it ($32 stays $32)
+5. `render_status` renders progress bar + equity + ROI correctly
+6. `render_report` lists recent trades + open positions correctly
+7. `render_summary` includes verdict heuristic ("Trial is performing well" at WR=60%, PF=4.76, ROI=3.2%)
+8. `panel_block` injects 2-line trial progress block into panel
+9. `stop_trial` clears `trial_active=0`; `can_go_live` correctly denies non-approved uid (gated by `LIVE_TRADE_ALLOWED_IDS`)
+
+**Spec compliance (user's §1-§7) verified:**
+- No trading logic, risk engine, execution, telemetry, rate-limit, or safety-layer code touched this turn.
+- `trial.py` is a pure wrapper: sets existing `users` columns (PAPER mode, autotrade, capital) — uses the existing paper-trading engine to run trades, not a new code path.
+- Never touches live / exchange / real funds. `go_live` subcommand gated by `LIVE_TRADE_ALLOWED_IDS` (separate from admin_only).
+
+**Nothing committed this turn.** Correct professional move was runtime evidence, not re-implementation noise.
+
+**Activation path (unchanged from §18.11):**
+On Railway → set `FEATURE_TRIAL_MODE=true` → Deploy. Then:
+- `/trial start 1000` — begin 14-day paper run with $1000 virtual capital
+- `/trial status | report | summary | stop | go_live confirm`
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
