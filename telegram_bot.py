@@ -744,39 +744,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🤖 AutoTrade", reply_markup=autotrade_keyboard())
 
     elif data == "cmd_autotrade_on":
-        if admin_only(uid):
-            execute("UPDATE users SET autotrade_enabled=1 WHERE user_id=?", (uid,))
-            await query.edit_message_text("✅ AutoTrade enabled.", reply_markup=back_keyboard())
-        else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+        # Per-user flag — any user may toggle their own autotrade
+        execute("UPDATE users SET autotrade_enabled=1 WHERE user_id=?", (uid,))
+        await query.edit_message_text("✅ AutoTrade enabled.", reply_markup=back_keyboard())
 
     elif data == "cmd_autotrade_off":
-        if admin_only(uid):
-            execute("UPDATE users SET autotrade_enabled=0 WHERE user_id=?", (uid,))
-            await query.edit_message_text("⛔ AutoTrade disabled.", reply_markup=back_keyboard())
-        else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+        execute("UPDATE users SET autotrade_enabled=0 WHERE user_id=?", (uid,))
+        await query.edit_message_text("⛔ AutoTrade disabled.", reply_markup=back_keyboard())
 
     # --- Mode submenu ---
     elif data == "menu_mode":
         await query.edit_message_text("📋 Trading Mode", reply_markup=mode_keyboard())
 
     elif data == "cmd_mode_paper":
-        if admin_only(uid):
-            execute("UPDATE users SET trade_mode='PAPER' WHERE user_id=?", (uid,))
-            await query.edit_message_text("📝 Mode set to PAPER.", reply_markup=back_keyboard())
-        else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+        # Per-user flag — any user may switch their own account to PAPER
+        execute("UPDATE users SET trade_mode='PAPER' WHERE user_id=?", (uid,))
+        await query.edit_message_text("📝 Mode set to PAPER.", reply_markup=back_keyboard())
 
     elif data == "cmd_mode_live":
-        if admin_only(uid):
-            if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
-                await query.edit_message_text("⛔ Live mode requires approval.", reply_markup=back_keyboard())
-            else:
-                execute("UPDATE users SET trade_mode='LIVE' WHERE user_id=?", (uid,))
-                await query.edit_message_text("🔴 Mode set to LIVE.", reply_markup=back_keyboard())
+        # Live mode is gated by LIVE_TRADE_ALLOWED_IDS (approval list),
+        # not by admin_only — users who aren't approved simply can't flip live.
+        if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
+            await query.edit_message_text(
+                "⛔ Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.",
+                reply_markup=back_keyboard())
         else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+            execute("UPDATE users SET trade_mode='LIVE' WHERE user_id=?", (uid,))
+            await query.edit_message_text("🔴 Mode set to LIVE.", reply_markup=back_keyboard())
 
     # --- Risk submenu ---
     elif data == "menu_risk":
@@ -789,11 +783,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Sell Now ---
     elif data == "cmd_sellnow":
-        if admin_only(uid):
-            closed = close_all_for_pair(SETTINGS.PAIR, "manual_sellnow") or 0
-            await query.edit_message_text(f"🛑 Closed {closed} open trade(s).", reply_markup=back_keyboard())
-        else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+        # Per-user — closes only THIS user's open trades (close_all_for_pair
+        # is scoped on user_id internally). Any user may close their own.
+        closed = close_all_for_pair(SETTINGS.PAIR, "manual_sellnow", user_id=uid) or 0
+        await query.edit_message_text(f"🛑 Closed {closed} open trade(s).", reply_markup=back_keyboard())
 
     # --- Guards Set submenu ---
     elif data == "menu_guards_set":
@@ -963,14 +956,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
 
     elif data == "cmd_liveready":
-        if admin_only(uid):
-            await query.edit_message_text("Running live-readiness check...")
-            from reconcile import check_live_readiness, format_readiness_report
-            result = check_live_readiness()
-            txt = format_readiness_report(result)
-            await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
-        else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+        # Read-only diagnostic — open to all users
+        await query.edit_message_text("Running live-readiness check...")
+        from reconcile import check_live_readiness, format_readiness_report
+        result = check_live_readiness()
+        txt = format_readiness_report(result)
+        await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     # --- New visual card commands ---
     elif data == "cmd_heatmap":
@@ -1550,9 +1541,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def autotrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
+    # Per-user flag — any user may toggle their own autotrade
     if not context.args:
         await update.message.reply_text("Usage: /autotrade on|off")
         return
@@ -1562,9 +1551,7 @@ async def autotrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
+    # Per-user setting — LIVE still gated by LIVE_TRADE_ALLOWED_IDS below
     if not context.args:
         await update.message.reply_text("Usage: /mode paper|live")
         return
@@ -1573,7 +1560,7 @@ async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Mode must be paper or live.")
         return
     if m == "LIVE" and uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
-        await update.message.reply_text("Live mode requires approval.")
+        await update.message.reply_text("Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.")
         return
     execute("UPDATE users SET trade_mode=? WHERE user_id=?", (m, uid))
     await update.message.reply_text(f"Mode set to {m}.", reply_markup=back_keyboard())
@@ -1593,10 +1580,8 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sellnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
-    closed = close_all_for_pair(SETTINGS.PAIR, "manual_sellnow") or 0
+    # Per-user — close only THIS user's open trades on the pair
+    closed = close_all_for_pair(SETTINGS.PAIR, "manual_sellnow", user_id=uid) or 0
     await update.message.reply_text(f"Closed {closed} open trade(s).", reply_markup=back_keyboard())
 
 async def set_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1717,42 +1702,47 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def capital_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
+    # Per-user capital — reads/writes users.capital_usd, NOT the global setting
     if not context.args:
-        await update.message.reply_text(f"Capital: ${SETTINGS.CAPITAL_USD:,.2f}\nUsage: /capital <amount>", reply_markup=back_keyboard())
+        row = fetchone("SELECT capital_usd FROM users WHERE user_id=?", (uid,))
+        cur = float(row[0]) if row and row[0] is not None else SETTINGS.CAPITAL_USD
+        await update.message.reply_text(
+            f"Your capital: ${cur:,.2f}\nUsage: /capital <amount>",
+            reply_markup=back_keyboard())
         return
     try:
         val = float(context.args[0])
-        if val <= 0: raise ValueError
+        if val <= 0:
+            raise ValueError
     except ValueError:
         await update.message.reply_text("Invalid amount.")
         return
-    import config
-    config.SETTINGS.CAPITAL_USD = val
-    upsert_bot_state('capital_usd', str(val), int(time.time()))
-    await update.message.reply_text(f"Capital set to ${val:,.2f}", reply_markup=back_keyboard())
+    execute("UPDATE users SET capital_usd=? WHERE user_id=?", (val, uid))
+    await update.message.reply_text(f"Your capital set to ${val:,.2f}", reply_markup=back_keyboard())
 
 async def maxexposure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
+    # Per-user max portfolio exposure — users.max_portfolio_exposure column
     if not context.args:
-        pct = SETTINGS.MAX_PORTFOLIO_EXPOSURE
-        await update.message.reply_text(f"Max exposure: {pct*100:.0f}%\nUsage: /maxexposure <0.0-1.0>", reply_markup=back_keyboard())
+        row = fetchone("SELECT max_portfolio_exposure FROM users WHERE user_id=?", (uid,))
+        pct = float(row[0]) if row and row[0] is not None else SETTINGS.MAX_PORTFOLIO_EXPOSURE
+        await update.message.reply_text(
+            f"Your max exposure: {pct*100:.0f}%\nUsage: /maxexposure <0.0-1.0>",
+            reply_markup=back_keyboard())
         return
     try:
         val = float(context.args[0])
-        if not 0 < val <= 1.0: raise ValueError
+        if not 0 < val <= 1.0:
+            raise ValueError
     except ValueError:
         await update.message.reply_text("Must be 0 < value <= 1.0")
         return
-    import config
-    config.SETTINGS.MAX_PORTFOLIO_EXPOSURE = val
-    upsert_bot_state('max_portfolio_exposure', str(val), int(time.time()))
-    await update.message.reply_text(f"Max exposure: {val*100:.0f}% (${SETTINGS.CAPITAL_USD * val:,.2f})", reply_markup=back_keyboard())
+    execute("UPDATE users SET max_portfolio_exposure=? WHERE user_id=?", (val, uid))
+    row = fetchone("SELECT capital_usd FROM users WHERE user_id=?", (uid,))
+    cap = float(row[0]) if row and row[0] is not None else SETTINGS.CAPITAL_USD
+    await update.message.reply_text(
+        f"Your max exposure: {val*100:.0f}% (${cap * val:,.2f})",
+        reply_markup=back_keyboard())
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from validators import run_all_checks
@@ -2453,11 +2443,7 @@ async def reconcile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def liveready_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run live-readiness check. Usage: /liveready"""
-    uid = update.effective_user.id
-    if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
-        return
+    """Run live-readiness check. Usage: /liveready  (read-only — open to all)"""
     await update.message.reply_text("Running live-readiness check...")
     from reconcile import check_live_readiness, format_readiness_report
     result = check_live_readiness()

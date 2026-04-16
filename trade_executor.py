@@ -22,10 +22,22 @@ def open_trade(pair: str, side: str, qty: float, price: float,
     return insert_trade(pair, side, qty, price, reason, entry_snapshot)
 
 
-def close_all_for_pair(pair: str, reason: str = "") -> int:
-    """Close all OPEN trades for the given pair."""
-    rows = fetchall("SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?)",
-                    (pair, pair.replace('/', '')))
+def close_all_for_pair(pair: str, reason: str = "", user_id: int = None) -> int:
+    """Close all OPEN trades for the given pair.
+    When `user_id` is provided, closes only that user's trades (multi-user
+    safe). When omitted, closes globally (legacy behaviour — retained for
+    system-wide operations such as reconcile).
+    """
+    if user_id is not None:
+        rows = fetchall(
+            "SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?) AND user_id=?",
+            (pair, pair.replace('/', ''), user_id),
+        )
+    else:
+        rows = fetchall(
+            "SELECT id FROM trades WHERE status='OPEN' AND pair IN (?,?)",
+            (pair, pair.replace('/', '')),
+        )
     count = 0
     for (tid,) in rows:
         append_trade_note(tid, f" | {reason}")

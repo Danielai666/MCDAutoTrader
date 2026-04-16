@@ -402,6 +402,19 @@ def _open_trades_count(uid: int) -> int:
         return 0
 
 
+def _exchange_status(uid: int) -> Optional[str]:
+    """Return a short exchange-connection indicator for the panel header
+    (e.g. '🔗 KRAKEN'), or None if the user has no exchange connected."""
+    try:
+        from storage import get_credential
+        cred = get_credential(uid, "ccxt")
+        if cred and cred.get("exchange_id"):
+            return f"🔗 {cred['exchange_id'].upper()}"
+    except Exception:
+        pass
+    return None
+
+
 def build_panel_text(uid: int) -> str:
     user = _load_user_row(uid)
     mode = user.get("mode", "PAPER")
@@ -423,6 +436,7 @@ def build_panel_text(uid: int) -> str:
 
     status = _system_status(uid)
     open_n = _open_trades_count(uid)
+    exch_status = _exchange_status(uid)
 
     last_act = _last_action.get(uid)
     if last_act:
@@ -467,9 +481,11 @@ def build_panel_text(uid: int) -> str:
     except Exception:
         pass
 
+    exch_line = f"   {exch_status}" if exch_status else ""
+
     return (
         f"*{title}*\n"
-        f"{mode_lbl}: `{mode}`   {at_lbl}: `{autotrade_label}`   {open_lbl}: `{open_n}`\n"
+        f"{mode_lbl}: `{mode}`   {at_lbl}: `{autotrade_label}`   {open_lbl}: `{open_n}`{exch_line}\n"
         f"{pairs_lbl}: `{pairs_str}`\n"
         f"{sig_lbl}: {last_sig}\n"
         f"{last_action_line}\n"
