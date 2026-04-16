@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `90dbf5f` (UI dedup — remove duplicate ⚡ Quick Actions row, 4×3 clean grid)
+> Latest commit: `571b7c8` (Account — per-user dashboard for multi-user trial testing)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1205,6 +1205,71 @@ User spec: "non-destructive surgical cleanup. Treat as professional refactor, no
 
 **Commit:** `90dbf5f`.
 
+### 18.24 Account dashboard — per-user profile for multi-user trial testing
+
+User spec: the bot will be given to real users for a 2-week trial. The Account section needed to become a professional per-user dashboard where each tester can instantly see their own state. Scope-locked: UI/reporting only, no trading-logic changes.
+
+**Single source of truth:** `_render_account_dashboard(uid)` in `telegram_bot.py` builds the full dashboard text. Used by three entry points so output stays consistent:
+1. `menu_account` callback (main-panel 👤 Account tile)
+2. `cmd_myaccount` callback (My Account button, anywhere it's used)
+3. `/myaccount` slash command
+
+**Dashboard sections (bilingual EN/FA, all user-scoped):**
+
+| Section | Contents |
+|---|---|
+| A) Identity | User ID · Telegram `@username` |
+| B) Mode & Status | Mode (PAPER/LIVE) · AutoTrade (ON/OFF) · Trial active + day x/y + capital |
+| C) Exchange | Connected exchange · Connection status · Masked API key (only when connected) |
+| D) Settings | Language (EN/FA) · Capital · Daily Loss Limit · Max Exposure |
+| E) Live Access | "Allowed" or "Trial only" (read from `LIVE_TRADE_ALLOWED_IDS`) |
+| F) Account Status | ✅/⚠️/ℹ️ indicators: Trial active/inactive · Exchange connected/missing · Paper/Live mode · AutoTrade ON/OFF · Live trading enabled/disabled |
+
+**Account submenu expanded** — Account is now a one-stop hub for testers. Every per-user configuration is 1-2 taps away:
+```
+🔌 Connect           🔌 Disconnect
+💼 Portfolio         🌐 Language
+🧪 Trial (→ submenu) ⚙️ Settings (→ Preferences)
+🔄 Refresh
+⬅️ Back              🏠 Main Menu
+```
+
+**Data sources (all user-scoped):**
+- `users` row via `UserContext.load(uid)` — mode, capital, risk, language, autotrade, limits
+- `credentials` row via `storage.get_credential(uid)` — exchange_id, api_key_enc
+- `trial.get_trial(uid)` — trial state/progress (respects `FEATURE_TRIAL_MODE` flag)
+- `config.LIVE_TRADE_ALLOWED_IDS` — live-access allowlist
+- `i18n.t(uid, key)` — localized labels in user's chosen language
+
+**Security properties (verified at commit):**
+- Raw `api_key_enc` / `api_secret_enc` never appear in output
+- Only `crypto_utils.mask_secret(ctx.exchange_key)` preview shown, and only when exchange is connected
+- `"secret"` substring absent from all render paths
+- All reads use `user_id` scoping — no cross-tenant exposure
+
+**i18n:** 42 new keys in both EN and FA — section headers, all labels, value tokens, status lines, new button labels. No hardcoded English strings.
+
+**Verification (runtime simulation with in-memory SQLite):**
+- `ast` + `py_compile` on `panel.py`, `i18n.py`, `telegram_bot.py`
+- 10/10 Account submenu callbacks dispatch correctly
+- EN render with active trial — full 6 sections, all labels localized
+- FA render with active trial — full 6 sections, all labels localized (Farsi)
+- Minimal state (no trial, no exchange) — graceful fallbacks
+- Zero raw secret / encrypted-key leaks in any render path
+
+**Preserved (explicit non-destruction):**
+- No trading logic / strategy / risk / execution changes
+- No DB schema changes (read-only use of existing columns)
+- Multi-user isolation intact (all queries user_id-scoped)
+- No existing callbacks renamed or removed
+- `/myaccount` slash command still works; old text-list format replaced with dashboard
+- Safety layer, confirmation flows, rate limits, telemetry all unchanged
+- `FEATURE_TRIAL_MODE` / `FEATURE_I18N` respected — graceful fallbacks when off
+
+**Files touched:** `panel.py`, `i18n.py`, `telegram_bot.py` (3 files; 258 insertions, 46 deletions)
+
+**Commit:** `571b7c8`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1217,7 +1282,7 @@ User spec: "non-destructive surgical cleanup. Treat as professional refactor, no
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `90dbf5f` (UI dedup — remove duplicate Quick Actions row, 4×3 clean grid) |
+| Latest commit | `571b7c8` (Account — per-user dashboard for multi-user trial testing) |
 | `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
