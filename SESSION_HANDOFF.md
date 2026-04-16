@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `5dc1308` (Ownership model — shared AI + strictly per-user exchange credentials enforced)
+> Latest commit: `bbf0a20` (Portfolio v3 — real wallet history, per-asset detail, allocation %, snapshot persistence)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1316,6 +1316,85 @@ User spec: the platform provides shared AI/API infrastructure (owner-paid), but 
 
 **Commit:** `5dc1308`.
 
+### 18.26 Portfolio v3 — real wallet history, per-asset detail, allocation %
+
+User spec: make the bot a real account-monitoring tool with historical portfolio reporting. Extends portfolio v1 (§18.13) and v2 (§18.14) additively — did not rewrite what already worked.
+
+**Honest upfront:** user's spec explicitly said "If exact historical wallet snapshots are not yet stored, implement a safe snapshot system going forward. Do NOT fake historical data." Followed this literally — history is empty the first time a user runs `/portfolio` and fills in as they use the bot.
+
+**New DB table (additive migration, SQLite + PG):**
+```sql
+CREATE TABLE portfolio_snapshots(
+  id, user_id, ts, total_value, cash_value, positions_value,
+  unrealized_pnl, asset_summary_json, exchange_id
+);
+CREATE INDEX idx_portfolio_snapshots_user_ts ON portfolio_snapshots(user_id, ts);
+```
+
+**Snapshot persistence design:**
+- Auto-save on every successful live `fetch_portfolio()` call
+- Throttled to max 1 save per hour per user (prevents row spam during active use)
+- Only `sync_status='OK'` snapshots persisted (NO_EXCHANGE / ERROR skipped)
+- No fabricated data — if there are no snapshots in window, report clearly says so
+
+**New commands:**
+- `/portfolio history [days]` — value change over window, from stored snapshots
+- `/portfolio asset <SYMBOL>` — per-asset detail from latest cached snapshot
+
+**New portfolio.py helpers:**
+- `save_snapshot(uid, snap)` — throttled persist
+- `get_oldest_snapshot_in_window(uid, days)`, `get_latest_snapshot(uid)`, `get_snapshot_count(uid)`
+- `format_history(uid, days)` — bilingual history render
+- `format_asset_detail(uid, symbol)` — bilingual per-asset render
+
+**Existing `format_portfolio` upgraded:**
+Assets section now shows allocation % per holding:
+```
+• BTC   0.010000  @ $55,000.00  = $550.00 (51.2%)
+• USDT  525.000   @ $1.00       = $525.00 (48.8%)
+```
+
+**Account dashboard integration (§7 of spec):**
+When portfolio cache is warm, the Exchange section of Account dashboard shows:
+```
+Total value: $1,075.00   Available cash: $525.00
+Assets: 2   Sync: 00:05:42
+```
+Cache-only read — never triggers a live fetch from the dashboard. Empty until the user runs `/portfolio` once.
+
+Account submenu expanded with two new shortcut buttons:
+- 📉 Report → `cmd_portfolio_report` (7-day local-trades PnL)
+- 📈 History → `cmd_portfolio_history` (real value change over time)
+
+**i18n:** 21 new keys per locale (history labels, asset detail labels, button labels). No hardcoded English.
+
+**Security (reaffirmed, unchanged since §18.25):**
+- No `create_order` / `cancel_order` / `transfer` / `withdraw` in new code
+- `asset_summary_json` stores only public fields (symbol, amount, price, value) — never API keys or secrets
+- All queries user_id-scoped
+- New callbacks (`cmd_portfolio_report`, `cmd_portfolio_history`) route through existing rate-limit + touch_user + telemetry + safe-error plumbing
+
+**Verification (runtime simulation — 7/7 paths pass):**
+- `ast` + `py_compile` on storage.py, portfolio.py, telegram_bot.py, i18n.py, panel.py
+- `portfolio_snapshots` table migrated in in-memory SQLite
+- `save_snapshot` persists correctly; throttle (1/hr) returns False on immediate re-save
+- `format_history` with 2 snapshots: +$75.00 (+7.50%) over 2.0d ✓
+- `format_history` with no snapshots: clean "history not available yet, run /portfolio" message
+- `format_asset_detail` renders amount/price/value/allocation% correctly
+- `format_portfolio` Assets section shows % allocation per holding
+
+**Preserved (strict non-destruction):**
+- No trading logic / strategy / risk / execution / ownership-model changes
+- No changes to `/portfolio` or `/portfolio report 7d|30d|real` commands
+- Multi-user isolation intact (user_id on every query)
+- All existing callbacks untouched; 2 new added
+- Safety layer, confirmation flows, rate limits all unchanged
+- `FEATURE_PORTFOLIO` flag still gates every new path
+
+**Files touched:** `storage.py`, `portfolio.py`, `telegram_bot.py`, `i18n.py`, `panel.py` (5 files; 382 insertions, 10 deletions)
+
+**Commit:** `bbf0a20`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1328,7 +1407,7 @@ User spec: the platform provides shared AI/API infrastructure (owner-paid), but 
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `5dc1308` (Ownership model — shared AI + strictly per-user exchange credentials enforced) |
+| Latest commit | `bbf0a20` (Portfolio v3 — wallet history, per-asset detail, allocation %, snapshot persistence) |
 | `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
