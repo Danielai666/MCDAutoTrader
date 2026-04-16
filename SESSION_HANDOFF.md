@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `b1a26d2` (UI — 🛠 Advanced submenu, lean main panel, Price/Health restored)
+> Latest commit: `90dbf5f` (UI dedup — remove duplicate ⚡ Quick Actions row, 4×3 clean grid)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1159,6 +1159,52 @@ All 13 interactive elements reuse existing callbacks — zero new logic:
 
 **Commit:** `b1a26d2`.
 
+### 18.23 UI dedup — remove duplicate ⚡ Quick Actions row
+
+User spec: "non-destructive surgical cleanup. Treat as professional refactor, not redesign." Status/Signal/Positions/Panic were rendering in three surfaces simultaneously after §18.21. Spec called for removing only the duplicated presentation layer.
+
+**Surfaces before cleanup:**
+| Action | Duplicate surfaces |
+|---|---|
+| Status | Row 0 (⚡), Row 1 (📊), bottom ReplyKeyboard, `/status` — 4 paths |
+| Signal | Row 0 (⚡), Row 1 (📈), `/signal` — 3 paths |
+| Positions | Row 0 (⚡), Row 1 (💼), `/positions` — 3 paths |
+| Panic | Row 0 (🛑), Mode submenu → `confirm_panic`, bottom ReplyKeyboard, `/panic_stop` — 4 paths |
+
+**Fix:** Removed Row 0 from `build_panel_keyboard` in `panel.py`. Zero other files touched.
+
+**Result — clean 4×3 grid:**
+```
+📊 Status · 📈 Signal · 💼 Positions
+📉 Report · 🤖 Auto   · ⚙️ Mode
+🎯 Risk   · 🌐 Pairs  · 👤 Account
+💰 Price  · 💚 Health · 🛠 Advanced
+```
+
+**Reachability after cleanup (every action still has 2–3 paths):**
+- Status → Row 1 tile · bottom ReplyKeyboard · `/status`
+- Signal → Row 1 tile · `/signal`
+- Positions → Row 1 tile · `/positions`
+- Panic → Mode submenu (`confirm_panic` intermediate preserved) · bottom ReplyKeyboard · `/panic_stop`
+- Menu → bottom ReplyKeyboard · `/menu` · every submenu's 🏠 button
+
+**Validation checklist (13 checks, all passed):**
+- Menu / Status / Signal / Positions / Panic all still work — verified via grep for handler presence
+- `refresh_panel` logic unchanged (edit_message_text + MD5 hash dedupe)
+- `bottom_reply_keyboard(uid)` unchanged (Menu · Status · Panic Stop)
+- 12/12 main callbacks dispatch correctly
+- All 7 L2 submenus reachable from main panel
+- All 11 power-user actions preserved in Advanced submenu
+- Mode submenu still contains Panic button with confirm_panic
+- `text_input_handler` routing for bottom keys intact (EN + FA)
+- Orphaned i18n keys (`btn_quick_*`) retained for backward compat
+
+**Files touched:** 1 (`panel.py` — 16 insertions, 22 deletions)
+
+**Untouched:** `i18n.py`, `telegram_bot.py`, `storage.py`, `trial.py`, `portfolio.py`, `telemetry.py`, `trade_executor.py`, `strategy.py`, `risk.py`, `scheduler.py`, `config.py` — zero changes. No callbacks renamed, no handlers removed, no flows altered.
+
+**Commit:** `90dbf5f`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1171,8 +1217,8 @@ All 13 interactive elements reuse existing callbacks — zero new logic:
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `b1a26d2` (UI — Advanced submenu, lean main panel, Price/Health restored) |
-| `FEATURE_CONTROL_PANEL` | `true` — Quick Actions row + lean main (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including new Advanced with 11 power-user actions) + category previews + dual-nav footers + confirmation flows + exchange-connection indicator |
+| Latest commit | `90dbf5f` (UI dedup — remove duplicate Quick Actions row, 4×3 clean grid) |
+| `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
 | `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
