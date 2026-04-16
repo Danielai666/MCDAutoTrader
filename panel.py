@@ -203,38 +203,49 @@ def _btn(uid: Optional[int], key: str, fallback: str) -> str:
 
 def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """
-    Level-1 main panel: 12 category buttons in a 4×3 grid.
-    Every callback_data MUST match an existing button_callback dispatch case.
-    When `uid` is None, falls back to English (safe default for callers without
-    a user context such as help text or error surfaces).
+    Main panel layout:
+      Row 0  — ⚡ Quick Actions (Status · Signal · Positions · 🛑 Panic)
+      Rows 1-4 — 12 category tiles (4×3 grid)
 
-    Each tile either opens a Level-2 submenu (menu_*) or runs a direct
-    read-only action (cmd_* for quick reads like Status / Signal / Positions).
+    Quick Actions appear ABOVE the main grid for one-tap access to the most
+    frequent reads + the emergency stop, without duplicating effort (tapping
+    Status here goes to the same handler as the Status tile below — the extra
+    row is discoverability, not a second code path).
     """
     rows = [
-        # Row 1 — Read-only quick reads
+        # Row 0 — ⚡ Quick Actions (always visible at the top)
+        # Duplicates Status/Signal/Positions from the category grid below,
+        # per spec §1+§5 — main menu keeps all 12 categories intact,
+        # Quick Actions is an additional fast-access row above.
+        [
+            InlineKeyboardButton(_btn(uid, "btn_quick_status", "⚡ Status"), callback_data="cmd_status"),
+            InlineKeyboardButton(_btn(uid, "btn_quick_signal", "⚡ Signal"), callback_data="cmd_signal"),
+            InlineKeyboardButton(_btn(uid, "btn_quick_positions", "⚡ Positions"), callback_data="cmd_positions_card"),
+            InlineKeyboardButton(_btn(uid, "btn_panic", "🛑 Panic"), callback_data="confirm_panic"),
+        ],
+        # Row 1 — Status / Signal / Positions (category tiles, same callbacks)
         [
             InlineKeyboardButton(_btn(uid, "btn_status", "📊 Status"), callback_data="cmd_status"),
             InlineKeyboardButton(_btn(uid, "btn_signal", "📈 Signal"), callback_data="cmd_signal"),
             InlineKeyboardButton(_btn(uid, "btn_positions", "💼 Positions"), callback_data="cmd_positions_card"),
         ],
-        # Row 2 — Reporting + trading category submenus
+        # Row 2 — Report / AutoTrade / Mode
         [
             InlineKeyboardButton(_btn(uid, "btn_report", "📉 Report"), callback_data="menu_reporting"),
-            InlineKeyboardButton(_btn(uid, "btn_autotrade", "🤖 AutoTrade"), callback_data="menu_autotrade"),
+            InlineKeyboardButton(_btn(uid, "btn_autotrade", "🤖 Auto"), callback_data="menu_autotrade"),
             InlineKeyboardButton(_btn(uid, "btn_mode", "⚙️ Mode"), callback_data="menu_mode"),
         ],
-        # Row 3 — Risk / AI / Account submenus
+        # Row 3 — Risk / AI & Analysis / Account & Portfolio
         [
             InlineKeyboardButton(_btn(uid, "btn_risk", "🎯 Risk"), callback_data="menu_risk_v2"),
-            InlineKeyboardButton(_btn(uid, "btn_ai", "🧠 AI"), callback_data="menu_ai"),
-            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="menu_account"),
+            InlineKeyboardButton(_btn(uid, "btn_ai", "🧠 AI & Analysis"), callback_data="menu_ai"),
+            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account & Portfolio"), callback_data="menu_account"),
         ],
-        # Row 4 — Pairs / Trial / Preferences submenus
+        # Row 4 — Markets & Pairs / Trial / Settings & Strategy
         [
-            InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Pairs"), callback_data="menu_pairs"),
+            InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Markets & Pairs"), callback_data="menu_pairs"),
             InlineKeyboardButton(_btn(uid, "btn_trial", "🧪 Trial"), callback_data="menu_trial"),
-            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings"), callback_data="menu_preferences"),
+            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings & Strategy"), callback_data="menu_preferences"),
         ],
     ]
     return InlineKeyboardMarkup(rows)
@@ -243,10 +254,17 @@ def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
 # ------------------------------------------------------------------
 # Submenu builders (Level 2)
 # Every entry either routes to an existing callback or opens a deeper
-# menu. "⬅️ Back" is the universal return-to-main-menu control.
+# menu. Each submenu ends with a dual-nav row:
+#   ⬅️ Back      → goes to parent menu (currently same as Main Menu since
+#                  hierarchy is shallow — reserved for future deeper nesting)
+#   🏠 Main Menu → jumps to root panel
 # ------------------------------------------------------------------
 def _back_row(uid: Optional[int] = None) -> list:
-    return [InlineKeyboardButton(_btn(uid, "btn_back", "⬅️ Back"), callback_data="cmd_menu")]
+    """Dual-nav footer: ⬅️ Back + 🏠 Main Menu."""
+    return [
+        InlineKeyboardButton(_btn(uid, "btn_back", "⬅️ Back"), callback_data="cmd_menu"),
+        InlineKeyboardButton(_btn(uid, "btn_home", "🏠 Main Menu"), callback_data="cmd_menu"),
+    ]
 
 
 def build_risk_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
@@ -549,6 +567,21 @@ def build_panel_text(uid: int) -> str:
 
     exch_line = f"   {exch_status}" if exch_status else ""
 
+    # Compact preview block showing what's inside each category submenu.
+    # Helps discoverability without bloating button labels beyond their
+    # Telegram-render width. Kept short so the panel stays scannable.
+    previews_title = _tr(uid, "previews_title", "Categories")
+    previews = [
+        f"🎯 {_tr(uid, 'btn_risk_short', 'Risk')}  → {_tr(uid, 'preview_risk', 'Limits · SL/TP · Exposure')}",
+        f"🧠 {_tr(uid, 'btn_ai_short', 'AI & Analysis')}  → {_tr(uid, 'preview_ai', 'Signals · Insights · Charts')}",
+        f"🧪 {_tr(uid, 'btn_trial_short', 'Trial')}  → {_tr(uid, 'preview_trial', 'Start · Status · Report')}",
+        f"🌐 {_tr(uid, 'btn_markets_short', 'Markets')}  → {_tr(uid, 'preview_markets', 'Active · Add · Ranking')}",
+    ]
+    preview_block = f"\n\n_{previews_title}:_\n" + "\n".join(previews)
+
+    # Context hint ("👇 Select a category to continue")
+    hint = _tr(uid, "select_category_hint", "👇 Select a category to continue")
+
     return (
         f"*{title}*\n"
         f"{mode_lbl}: `{mode}`   {at_lbl}: `{autotrade_label}`   {open_lbl}: `{open_n}`{exch_line}\n"
@@ -557,8 +590,9 @@ def build_panel_text(uid: int) -> str:
         f"{last_action_line}\n"
         f"{status}"
         f"{portfolio_line}"
-        f"{trial_block}\n\n"
-        f"{select_lbl}"
+        f"{trial_block}"
+        f"{preview_block}\n\n"
+        f"{hint}"
     )
 
 
