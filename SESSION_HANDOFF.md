@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `0edd958` (UI clarity — Quick Actions row, category previews, dual-nav footer, improved labels)
+> Latest commit: `b1a26d2` (UI — 🛠 Advanced submenu, lean main panel, Price/Health restored)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1098,6 +1098,67 @@ Both currently point to `cmd_menu` (shallow hierarchy). Separate buttons signal 
 
 **Commit:** `0edd958`.
 
+### 18.22 🛠 Advanced submenu — regroup power-user actions, lean main panel
+
+User spec: "Do NOT remove any buttons, Do NOT rename callbacks, Do NOT modify logic — only adjust layout." The panel after §18.21 was clean but had 12 mixed-priority categories on main. This pass regroups power-user actions into a single Advanced tile.
+
+**Main panel changes:**
+- **Removed from main (still reachable via slash commands):**
+  - 🧠 AI & Analysis tile → `/ai`, `/analyze_screens`, `/divradar`, `/divzones`
+  - 🧪 Trial tile → `/trial start|status|report|summary|stop`
+  - ⚙️ Settings & Strategy tile → `/lang`, `/farsi`, `/langtest`
+- **Added to main:**
+  - 💰 Price (previously only typable `/price`)
+  - 💚 Health (previously only typable `/health`)
+  - 🛠 Advanced (new submenu)
+- **Label shortenings** (reduce truncation risk on narrow phones):
+  - `🌐 Markets & Pairs` → `🌐 Pairs`
+  - `👤 Account & Portfolio` → `👤 Account`
+- **Kept:** Quick Actions row (Status · Signal · Positions · 🛑 Panic) — Panic always visible per spec §5.
+
+**New 🛠 Advanced submenu** (`menu_advanced` callback, 5 rows):
+```
+🛑 Sell Now · 📐 SL/TP/Trail · ❌ Cancel
+🛡 Guards · 🔍 Check · ⚠️ Risk Board
+🔥 Heatmap · 🧠 Insights · 📊 Backtest
+🎨 Visuals · 🧩 Admin
+⬅️ Back · 🏠 Main Menu
+```
+All 13 interactive elements reuse existing callbacks — zero new logic:
+- Sell Now → `confirm_sellnow` (existing confirmation intermediate preserved)
+- SL/TP/Trail → `menu_guards_set` (existing submenu)
+- Cancel → `menu_cancel` (legacy keyboard)
+- Guards / Check / Risk Board → `cmd_guards` / `cmd_checkguards` / `cmd_risk_board`
+- Heatmap / Insights / Backtest → `cmd_heatmap` / `cmd_ai` / `cmd_backtest`
+- Visuals / Admin → `cmd_visuals` / `menu_admin`
+
+**Panel text preview block updated** to match new main-panel categories:
+```
+🎯 Risk      → Limits · SL/TP · Exposure
+🌐 Markets   → Active · Add · Ranking
+👤 Account   → Connect · Portfolio · Language
+🛠 Advanced  → Guards · Charts · Admin
+```
+
+**i18n:** 8 new keys per locale (`btn_advanced`, `btn_advanced_short`, `btn_account_short`, `btn_check_guards`, `preview_advanced`, `preview_account`, plus 2 short label variants); 3 existing labels shortened (`btn_account`, `btn_pairs`, related) in both EN and FA.
+
+**Explicitly unchanged:**
+- No `callback_data` values renamed or removed
+- No command handlers modified  
+- No business logic / trading / risk / execution / safety layer changes
+- Control panel text / refresh / message editing logic (per spec §7)
+- `FEATURE_TRIAL_MODE` / `FEATURE_I18N` / `FEATURE_PORTFOLIO` flags still independent
+- Trial/AI/Settings reachable via slash commands when their flags are on
+
+**Verification:**
+- `ast` + `py_compile` on `panel.py`, `i18n.py`, `telegram_bot.py`
+- Main panel: 5 rows, 16 buttons (4 quick + 3 category + 3 action + 3 category + 3 category)
+- Advanced: 5 rows, 13 interactive elements
+- 16/16 main callback_data values dispatch correctly
+- 13/13 Advanced callback_data values dispatch correctly
+
+**Commit:** `b1a26d2`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1110,8 +1171,8 @@ Both currently point to `cmd_menu` (shallow hierarchy). Separate buttons signal 
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `0edd958` (UI clarity — Quick Actions row, category previews, dual-nav footer, improved labels) |
-| `FEATURE_CONTROL_PANEL` | `true` — Quick Actions row + 12 category tiles + 7 L2 submenus + category previews in header + dual-nav footers + confirmation flows + exchange-connection indicator |
+| Latest commit | `b1a26d2` (UI — Advanced submenu, lean main panel, Price/Health restored) |
+| `FEATURE_CONTROL_PANEL` | `true` — Quick Actions row + lean main (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including new Advanced with 11 power-user actions) + category previews + dual-nav footers + confirmation flows + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
 | `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
