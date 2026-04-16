@@ -4,16 +4,21 @@
 > Project: `/Volumes/MiniSSD/aiMCDtrader/`
 > Repository: `MCDAutoTrader`
 > Date: 2026-04-15
-> Total: 44 Python files, ~12,500 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
+> Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
-> Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel (UI work baseline). Live on Railway + Supabase.
-> Latest commit: `f204963` (Portfolio upgrade — true equity, open positions, unrealized PnL, reconciliation, real-trade report)
+> Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
+> Latest commit: `40dd091` (Safety layer — dual-window rate limit + MAX_ACTIVE_USERS + clean exchange errors)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
 >   FEATURE_TRIAL_MODE=false      — user-toggled off (§18.11)
 >   FEATURE_I18N=false            — user-toggled off (§18.11, §18.12)
 >   FEATURE_PORTFOLIO=false       — user-toggled off (§18.14)
+>
+> Multi-user state (§18.15, §18.16):
+>   Personal commands ungated for all users; admin gate retained on
+>   killswitch / reconcile / health_stats only. Two tenant-leak bugs
+>   fixed. Safety layer (rate limit, user cap, error wrapper) in place.
 
 ---
 
@@ -793,6 +798,98 @@ Still read-from-cache-only — never triggers a fetch. Empty when cache cold or 
 
 **Commits:** `636b1f4` (v1), `f204963` (upgrade).
 
+### 18.15 Multi-user enablement — ungate personal commands + fix 2 tenant-leak bugs
+
+User asked for "full multi-user support". Honest audit first: the codebase had **already** claimed multi-user isolation in the docs (per-user DB columns, per-user credentials, per-user UserContext, scheduler iterating users). The actual gaps were narrower than the spec implied.
+
+**Audit findings (documented before writing code):**
+- Already done: `user_id` columns on every relevant table, `get_credential(uid)`, `save_credential(uid, ...)`, `upsert_user` with correct per-user defaults via schema, per-user scheduler iteration, every Telegram handler already extracting `uid`.
+- Actually missing: admin gates on commands that operate on the user's OWN account (`/autotrade`, `/mode`, `/sellnow`, `/capital`, `/maxexposure`, `/liveready`).
+- **Two silently critical tenant-leak bugs discovered during audit** (pre-existing, not introduced by this work):
+  1. `trade_executor.close_all_for_pair(pair, reason)` had **no `user_id` filter**. Any user calling `/sellnow` would close ALL users' OPEN trades on that pair.
+  2. `/capital` and `/maxexposure` commands wrote to GLOBAL state (`config.SETTINGS.CAPITAL_USD`, `bot_state`) despite per-user columns (`users.capital_usd`, `users.max_portfolio_exposure`) already existing via migration. One user's change would override every other user's setting at runtime.
+
+**Fixes shipped:**
+
+Ungated (personal commands — any user may modify their OWN account):
+- `/autotrade`, `/mode`, `/sellnow`, `/capital`, `/maxexposure`
+- Callback branches: `cmd_autotrade_on`, `cmd_autotrade_off`, `cmd_mode_paper`, `cmd_mode_live`, `cmd_sellnow`
+
+Opened as read-only diagnostic (no uid-scoping concerns):
+- `/liveready`, `cmd_liveready`
+
+Kept admin-gated (truly system-wide operations):
+- `/killswitch` (global env flag)
+- `/reconcile` (system-wide trade reconciliation)
+- `/health_stats` (global telemetry)
+- `menu_admin` (admin dashboard)
+
+Tenant-leak fixes:
+- `close_all_for_pair(pair, reason, user_id=None)` — added optional `user_id` parameter. When provided, scopes closures to that user only; when omitted, preserves legacy global behaviour for internal callers. `/sellnow` (both command and callback) now passes `uid`.
+- `capital_cmd` and `maxexposure_cmd` rewritten to read/write `users.capital_usd` and `users.max_portfolio_exposure` respectively. UserContext already reads these columns correctly, so the risk engine side needed no change.
+
+Live-mode safety preserved:
+- `cmd_mode_live` and `/mode` still gate LIVE selection by `LIVE_TRADE_ALLOWED_IDS` (a separate approval list, not admin_only). Unapproved users get a clear message pointing at the env var.
+
+Panel upgrade (per spec §9):
+- First header line now ends with `🔗 KRAKEN` (or similar) when the user has an exchange connected. Omitted when no credentials stored — keeps panel clean for paper-only users.
+
+**Restore anchor:** tag `v1.2-pre-multiuser` + branch `backup/pre-multiuser` at commit `ff42a67` captured BEFORE these changes. Revert path: `git reset --hard v1.2-pre-multiuser && git push origin main --force-with-lease`.
+
+**Commit:** `d6b64f4`.
+
+### 18.16 Production safety layer — dual-window rate limit, user cap, clean exchange errors
+
+User specced a production-grade safety layer. Second honest audit — most of it existed already (single-window per-user rate limit, CCXT's built-in global throttle via `enableRateLimit=True`, per-user risk limits, safe schema defaults, `logging_utils.py` module). Genuinely missing: burst-rate limiting, user-count soft cap, consistent exchange-error mapping to user-safe text.
+
+**What was already in place (confirmed, not re-built):**
+- Per-user rate limit: `_check_rate_limit(uid, limit=10, window=60)` + `rate_limited` decorator applied to every command handler.
+- Global exchange throttle: CCXT client instantiated with `enableRateLimit=True` in `ccxt_provider.py`.
+- Per-user risk limits: `users.capital_usd`, `users.max_portfolio_exposure`, `users.max_open_trades` columns + env-level `MAX_OPEN_TRADES=2`, `DAILY_LOSS_LIMIT_USD=40`.
+- Safe defaults for new users: schema enforces `trade_mode='PAPER'`, `autotrade_enabled=0`, `capital_usd=1000`, `language='en'`, trial fields=0.
+- Structured logging: `logging_utils.py` with JSON output, correlation IDs, regex-based secret redaction.
+- Isolation: audited last session; tenant-leak bugs in §18.15.
+
+**Additions this commit:**
+
+1. **Dual-window rate limit** (backward-compatible extension of `_check_rate_limit`):
+   - Burst: 5 commands in 10 seconds (`RATE_LIMIT_BURST_COUNT` / `RATE_LIMIT_BURST_WINDOW`).
+   - Volume: 10 commands in 60 seconds (`RATE_LIMIT_WINDOW_COUNT` / `RATE_LIMIT_WINDOW_SECONDS`).
+   - Both enforced simultaneously when called with no args. Legacy `(uid, limit, window)` signature preserved for `button_callback` and any other existing call site.
+   - Rejection message now matches user's spec text: `"Too many requests, slow down."`
+
+2. **`MAX_ACTIVE_USERS` soft cap (default 20):**
+   - `_is_over_user_cap()` counts rows in `users`.
+   - `/start` checks BEFORE `upsert_user`. Existing users bypass the cap.
+   - New users over the cap are registered but forced to `trade_mode='PAPER'` + `autotrade_enabled=0`, and shown: `"⚠️ User capacity reached (N active). You can use paper trading; live trading is disabled for new users."`
+   - Set `MAX_ACTIVE_USERS=0` on Railway to disable the cap.
+
+3. **Clean exchange-error wrapper:**
+   - `_safe_exchange_error(e)` maps raw CCXT exceptions to short user-safe strings. Checks specific subclasses (`RateLimitExceeded`, `AuthenticationError`, `ExchangeNotAvailable`) **before** parents (`NetworkError`, `ExchangeError`) — important because ccxt's exception tree has `RateLimitExceeded <- NetworkError`.
+   - Wired into `portfolio_cmd` live snapshot path and `/portfolio report real` path.
+   - Raw exception text no longer surfaces to users. Full exception still logged with `uid=` for operator debugging.
+
+4. **5 new Railway env flags (all optional, defaults ship safe):**
+   - `MAX_ACTIVE_USERS=20`
+   - `RATE_LIMIT_BURST_COUNT=5`
+   - `RATE_LIMIT_BURST_WINDOW=10`
+   - `RATE_LIMIT_WINDOW_COUNT=10`
+   - `RATE_LIMIT_WINDOW_SECONDS=60`
+
+**Deliberately NOT done (flagged to user):**
+- Full structured-logging rollout across ~100 log sites — `logging_utils.py` exists but integrating it everywhere would be a much larger refactor; current `log.*` calls already include uid in hot paths.
+- Error wrapper only on portfolio paths for now. Extending to `/connect`, `/myaccount`, and other exchange-touching commands is a one-line-per-site change — flagged as ready when requested.
+- `MAX_ACTIVE_USERS` is count-based (total registered users). If concurrency-based (active-in-last-hour) is desired, query would change to filter by `last_active_ts`. Flagged for user.
+
+**Verification (local):**
+- `ast` + `py_compile` on `telegram_bot.py` and `config.py`.
+- Dual-window rate-limit: 5 rapid calls allowed; 6th rejected with correct message.
+- Per-user isolation: uid=1 rate-limited does not block uid=99.
+- Legacy single-window call signature still works for existing call sites.
+- Exchange error mapper returns correct strings for `RateLimitExceeded`, `NetworkError`, `AuthenticationError`, `ExchangeError`, `ValueError` (generic) after fixing check-order bug.
+
+**Commit:** `40dd091`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -805,18 +902,20 @@ Still read-from-cache-only — never triggers a fetch. Empty when cache cold or 
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `f204963` (portfolio upgrade — true equity, open positions, unrealized PnL, reconciliation, real-trade report) |
-| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu (⚙️ Settings → language picker, extensible) |
-| `FEATURE_TRIAL_MODE` | `false` (user-toggled post-deploy; code deployed but no-op) |
-| `FEATURE_I18N` | `false` (user-toggled post-deploy; English only; Farsi translations ready) |
-| `FEATURE_PORTFOLIO` | `false` (user-toggled post-deploy; `/portfolio` replies "disabled") |
+| Latest commit | `40dd091` (safety layer — dual-window rate limit + MAX_ACTIVE_USERS + clean exchange errors) |
+| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu + exchange-connection indicator |
+| `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
+| `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
+| `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
 | `FEATURE_SCREENSHOTS` | `true` |
 | `FEATURE_AI_FUSION` | `false` |
 | `FEATURE_HIDDEN_DIVERGENCE` | `true` (used by strategy trigger path) |
 | `FEATURE_ICHIMOKU` | `true` |
 | `FEATURE_MT5_BRIDGE` | `false` |
-| Restore anchors | Tag `v1.0-rc1`, tag `v1.1-pre-ui-panel`, branch `backup/pre-ui-panel` (all on GitHub) |
-| Open deferrals | Exit optimization (ATR-unit reconciliation with user); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle) |
+| Multi-user state | Personal commands ungated; 2 tenant-leak bugs fixed; admin gate retained on killswitch/reconcile/health_stats only |
+| Safety layer | Dual-window rate limit (5/10s burst + 10/60s volume); `MAX_ACTIVE_USERS=20` soft cap; clean exchange-error wrapper on portfolio paths |
+| Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser` + branches `backup/pre-ui-panel`, `backup/pre-multiuser` (all on GitHub) |
+| Open deferrals | Exit optimization (ATR-unit reconciliation); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; exchange-error wrapper on non-portfolio paths |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
 | Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
 
@@ -834,6 +933,9 @@ Still read-from-cache-only — never triggers a fetch. Empty when cache cold or 
    - Full button-label translation is now done (§18.12) — when `FEATURE_I18N` is re-enabled, the entire grid + bottom ReplyKeyboard + Settings submenu all localize.
 7. **Trial Mode readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_TRIAL_MODE=true` on Railway. `/trial start 1000` begins a 14-day paper run.
 8. **i18n readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_I18N=true`. Then `/lang fa` or tap ⚙️ Settings → 🇮🇷 فارسی for instant Farsi UI across panel header + all buttons + bottom ReplyKeyboard.
-9. **Portfolio readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_PORTFOLIO=true`. Commands: `/portfolio` for live snapshot, `/portfolio report 7d|30d|<days>` for local-trades PnL, `/portfolio report real [days]` for exchange fetch_my_trades PnL (approximate). Read-only guarantees audited in code (no order/cancel/edit calls anywhere in `portfolio.py`).
-10. **Three dormant features, one active tuning observation:** all recent feature work (Trial, i18n, Portfolio) is deployed but flagged off at user's request. The live surface during burn-in is the control panel + existing trading loop + Phase 2 perf tuning. Flip any single flag to `true` on Railway to activate without code changes.
+9. **Portfolio readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_PORTFOLIO=true`. Commands: `/portfolio` for live snapshot, `/portfolio report 7d|30d|<days>` for local-trades PnL, `/portfolio report real [days]` for exchange fetch_my_trades PnL (approximate). Read-only guarantees audited in code.
+10. **Three dormant features, one active tuning observation:** all recent feature work (Trial, i18n, Portfolio) is deployed but flagged off at user's request. Flip any single flag to `true` on Railway to activate without code changes.
+11. **Multi-user live (§18.15):** personal commands are now open to all users (`/autotrade`, `/mode`, `/sellnow`, `/capital`, `/maxexposure`, `/liveready`). Two pre-existing tenant-leak bugs in the trading path were fixed. LIVE mode still requires the user's Telegram ID to be in `LIVE_TRADE_ALLOWED_IDS`.
+12. **Production safety (§18.16):** dual-window rate limit (5/10s burst + 10/60s volume), `MAX_ACTIVE_USERS=20` soft cap (new users over cap forced to paper), clean exchange-error wrapper on portfolio paths. All tunable via Railway env.
+13. **Future safety extensions when ready:** extend `_safe_exchange_error` to `/connect`, `/myaccount`, and other exchange-touching command paths (currently only wired into `/portfolio`). Wire `logging_utils.py` into high-traffic log sites for uniform JSON output with correlation IDs. Both are single-session work items — flag when desired.
 
