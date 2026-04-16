@@ -203,98 +203,164 @@ def _btn(uid: Optional[int], key: str, fallback: str) -> str:
 
 def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """
-    Modern grid layout, localized.
+    Level-1 main panel: 12 category buttons in a 4×3 grid.
     Every callback_data MUST match an existing button_callback dispatch case.
     When `uid` is None, falls back to English (safe default for callers without
     a user context such as help text or error surfaces).
+
+    Each tile either opens a Level-2 submenu (menu_*) or runs a direct
+    read-only action (cmd_* for quick reads like Status / Signal / Positions).
     """
     rows = [
-        # Row 1 — Core read-outs
+        # Row 1 — Read-only quick reads
         [
-            InlineKeyboardButton(_btn(uid, "btn_signal", "📊 Signal"), callback_data="cmd_signal"),
-            InlineKeyboardButton(_btn(uid, "btn_status", "📈 Status"), callback_data="cmd_status"),
+            InlineKeyboardButton(_btn(uid, "btn_status", "📊 Status"), callback_data="cmd_status"),
+            InlineKeyboardButton(_btn(uid, "btn_signal", "📈 Signal"), callback_data="cmd_signal"),
             InlineKeyboardButton(_btn(uid, "btn_positions", "💼 Positions"), callback_data="cmd_positions_card"),
         ],
-        # Row 2 — Risk / AI / Report
+        # Row 2 — Reporting + trading category submenus
         [
-            InlineKeyboardButton(_btn(uid, "btn_risk", "⚙️ Risk"), callback_data="menu_risk"),
-            InlineKeyboardButton(_btn(uid, "btn_ai_card", "🤖 AI Card"), callback_data="cmd_ai_card"),
             InlineKeyboardButton(_btn(uid, "btn_report", "📉 Report"), callback_data="menu_reporting"),
+            InlineKeyboardButton(_btn(uid, "btn_autotrade", "🤖 AutoTrade"), callback_data="menu_autotrade"),
+            InlineKeyboardButton(_btn(uid, "btn_mode", "⚙️ Mode"), callback_data="menu_mode"),
         ],
-        # Row 3 — Trading controls
+        # Row 3 — Risk / AI / Account submenus
         [
-            InlineKeyboardButton(_btn(uid, "btn_autotrade", "🔁 AutoTrade"), callback_data="menu_autotrade"),
-            InlineKeyboardButton(_btn(uid, "btn_mode", "🧪 Mode"), callback_data="menu_mode"),
-            InlineKeyboardButton(_btn(uid, "btn_connect", "🔌 Connect"), callback_data="cmd_connect"),
+            InlineKeyboardButton(_btn(uid, "btn_risk", "🎯 Risk"), callback_data="menu_risk_v2"),
+            InlineKeyboardButton(_btn(uid, "btn_ai", "🧠 AI"), callback_data="menu_ai"),
+            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="menu_account"),
         ],
-        # Row 4 — Analysis tools
+        # Row 4 — Pairs / Trial / Preferences submenus
         [
-            InlineKeyboardButton(_btn(uid, "btn_backtest", "📊 Backtest"), callback_data="cmd_backtest"),
-            InlineKeyboardButton(_btn(uid, "btn_analyze", "🔍 Analyze"), callback_data="cmd_analyze_screens"),
-            InlineKeyboardButton(_btn(uid, "btn_insights", "🧠 Insights"), callback_data="cmd_ai"),
-        ],
-        # Row 5 — Guards / board / heatmap
-        [
-            InlineKeyboardButton(_btn(uid, "btn_guards", "🛡 Guards"), callback_data="cmd_guards"),
-            InlineKeyboardButton(_btn(uid, "btn_risk_board", "⚠️ Risk Board"), callback_data="cmd_risk_board"),
-            InlineKeyboardButton(_btn(uid, "btn_heatmap", "🔥 Heatmap"), callback_data="cmd_heatmap"),
-        ],
-        # Row 6 — Panic / account / admin
-        [
-            InlineKeyboardButton(_btn(uid, "btn_panic", "🚨 PANIC"), callback_data="cmd_panic_stop"),
-            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="cmd_myaccount"),
-            InlineKeyboardButton(_btn(uid, "btn_admin", "🧩 Admin"), callback_data="menu_admin"),
-        ],
-        # Row 7 — Extras (preserved from the old menu, none removed)
-        [
-            InlineKeyboardButton(_btn(uid, "btn_price", "💰 Price"), callback_data="cmd_price"),
-            InlineKeyboardButton(_btn(uid, "btn_health", "💚 Health"), callback_data="cmd_health_stats"),
-            InlineKeyboardButton(_btn(uid, "btn_go_live", "🚀 Go Live"), callback_data="cmd_golive"),
-        ],
-        # Row 8 — Visuals / pairs / check guards
-        [
-            InlineKeyboardButton(_btn(uid, "btn_visuals", "🎨 Visuals"), callback_data="cmd_visuals"),
             InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Pairs"), callback_data="menu_pairs"),
-            InlineKeyboardButton(_btn(uid, "btn_check", "🔍 Check"), callback_data="cmd_checkguards"),
-        ],
-        # Row 9 — Manual exit / guard setters / cancel
-        [
-            InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="cmd_sellnow"),
-            InlineKeyboardButton(_btn(uid, "btn_sltp_trail", "📐 SL/TP/Trail"), callback_data="menu_guards_set"),
-            InlineKeyboardButton(_btn(uid, "btn_cancel", "❌ Cancel"), callback_data="menu_cancel"),
-        ],
-        # Row 10 — Settings / Disconnect
-        [
-            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings"), callback_data="menu_settings"),
-            InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="cmd_disconnect"),
+            InlineKeyboardButton(_btn(uid, "btn_trial", "🧪 Trial"), callback_data="menu_trial"),
+            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings"), callback_data="menu_preferences"),
         ],
     ]
     return InlineKeyboardMarkup(rows)
 
 
-def build_settings_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
-    """Settings submenu — currently language selection, extensible for
-    future options (timezone, notifications, etc.) without touching the
-    main panel layout."""
+# ------------------------------------------------------------------
+# Submenu builders (Level 2)
+# Every entry either routes to an existing callback or opens a deeper
+# menu. "⬅️ Back" is the universal return-to-main-menu control.
+# ------------------------------------------------------------------
+def _back_row(uid: Optional[int] = None) -> list:
+    return [InlineKeyboardButton(_btn(uid, "btn_back", "⬅️ Back"), callback_data="cmd_menu")]
+
+
+def build_risk_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """🎯 Risk submenu — Daily Limit / Capital / Max Exposure / SL·TP·Trail / Risk Board."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_btn(uid, "btn_lang_en", "🇬🇧 English"),
-                              callback_data="settings_lang_en"),
-         InlineKeyboardButton(_btn(uid, "btn_lang_fa", "🇮🇷 فارسی"),
-                              callback_data="settings_lang_fa")],
-        [InlineKeyboardButton(_btn(uid, "btn_back", "⬅️ Back"),
-                              callback_data="cmd_menu")],
+        [InlineKeyboardButton(_btn(uid, "btn_daily_limit", "📊 Daily Limit"), callback_data="menu_risk"),
+         InlineKeyboardButton(_btn(uid, "btn_capital", "💰 Capital"), callback_data="prompt_capital")],
+        [InlineKeyboardButton(_btn(uid, "btn_maxexposure", "📈 Max Exposure"), callback_data="prompt_maxexposure"),
+         InlineKeyboardButton(_btn(uid, "btn_sltp_trail", "📐 SL/TP/Trail"), callback_data="menu_guards_set")],
+        [InlineKeyboardButton(_btn(uid, "btn_risk_board", "⚠️ Risk Board"), callback_data="cmd_risk_board")],
+        _back_row(uid),
     ])
 
 
+def build_ai_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """🧠 AI / Analysis submenu."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_ai_card", "🤖 AI Card"), callback_data="cmd_ai_card"),
+         InlineKeyboardButton(_btn(uid, "btn_insights", "🧠 Insights"), callback_data="cmd_ai")],
+        [InlineKeyboardButton(_btn(uid, "btn_analyze", "🔍 Analyze"), callback_data="cmd_analyze_screens"),
+         InlineKeyboardButton(_btn(uid, "btn_visuals", "🎨 Visuals"), callback_data="cmd_visuals")],
+        [InlineKeyboardButton(_btn(uid, "btn_backtest", "📊 Backtest"), callback_data="cmd_backtest"),
+         InlineKeyboardButton(_btn(uid, "btn_heatmap", "🔥 Heatmap"), callback_data="cmd_heatmap")],
+        _back_row(uid),
+    ])
+
+
+def build_trial_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """🧪 Trial submenu — Start / Status / Report / Summary / Stop."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_trial_start", "▶️ Start Trial"), callback_data="prompt_trial_start"),
+         InlineKeyboardButton(_btn(uid, "btn_trial_status", "📊 Status"), callback_data="cmd_trial_status")],
+        [InlineKeyboardButton(_btn(uid, "btn_trial_report", "📉 Report"), callback_data="cmd_trial_report"),
+         InlineKeyboardButton(_btn(uid, "btn_trial_summary", "📋 Summary"), callback_data="cmd_trial_summary")],
+        [InlineKeyboardButton(_btn(uid, "btn_trial_stop", "⏹ Stop"), callback_data="cmd_trial_stop")],
+        _back_row(uid),
+    ])
+
+
+def build_account_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """👤 Account submenu — Connect / Disconnect / Portfolio / My Account / Language."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_connect", "🔌 Connect"), callback_data="cmd_connect"),
+         InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="confirm_disconnect")],
+        [InlineKeyboardButton(_btn(uid, "btn_myaccount", "👤 My Account"), callback_data="cmd_myaccount"),
+         InlineKeyboardButton(_btn(uid, "btn_portfolio", "💼 Portfolio"), callback_data="cmd_portfolio")],
+        [InlineKeyboardButton(_btn(uid, "btn_language", "🌐 Language"), callback_data="menu_language")],
+        _back_row(uid),
+    ])
+
+
+def build_trading_actions_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Actions under Mode submenu — includes Sell Now (confirm) and Panic (confirm)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_mode_paper", "📝 Paper Mode"), callback_data="cmd_mode_paper"),
+         InlineKeyboardButton(_btn(uid, "btn_mode_live", "🔴 Live Mode"), callback_data="cmd_mode_live")],
+        [InlineKeyboardButton(_btn(uid, "btn_go_live", "🚀 Go Live Wizard"), callback_data="cmd_golive")],
+        [InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="confirm_sellnow"),
+         InlineKeyboardButton(_btn(uid, "btn_panic", "🚨 Panic Stop"), callback_data="confirm_panic")],
+        _back_row(uid),
+    ])
+
+
+def build_preferences_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """⚙️ Preferences submenu — risk profiles + future placeholders.
+    Conservative/Balanced/Aggressive/Notifications/Voice are flagged
+    "coming soon" — concrete behaviour requires user design decisions
+    (which specific risk_per_trade / exposure / max_trades values each
+    profile should set). The UI structure is in place for later wiring."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_conservative", "🛡 Conservative"), callback_data="pref_conservative"),
+         InlineKeyboardButton(_btn(uid, "btn_balanced", "⚖️ Balanced"), callback_data="pref_balanced")],
+        [InlineKeyboardButton(_btn(uid, "btn_aggressive", "🔥 Aggressive"), callback_data="pref_aggressive")],
+        [InlineKeyboardButton(_btn(uid, "btn_notifications", "🔔 Notifications"), callback_data="pref_notifications"),
+         InlineKeyboardButton(_btn(uid, "btn_voice", "🎙 Voice"), callback_data="pref_voice")],
+        _back_row(uid),
+    ])
+
+
+def build_language_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """🌐 Language picker — reused from the old Settings submenu."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_lang_en", "🇬🇧 English"), callback_data="settings_lang_en"),
+         InlineKeyboardButton(_btn(uid, "btn_lang_fa", "🇮🇷 فارسی"), callback_data="settings_lang_fa")],
+        _back_row(uid),
+    ])
+
+
+def build_confirm_menu(uid: Optional[int], action_cb: str, cancel_cb: str = "cmd_menu") -> InlineKeyboardMarkup:
+    """Generic confirmation prompt for sensitive actions.
+    action_cb: callback_data that runs the actual action on confirm.
+    cancel_cb: where to go on cancel (default: main menu)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_yes_confirm", "✅ Yes, confirm"), callback_data=action_cb),
+         InlineKeyboardButton(_btn(uid, "btn_cancel", "❌ Cancel"), callback_data=cancel_cb)],
+    ])
+
+
+# Preserved for backward-compat: old `build_settings_keyboard` still exists
+# but now just aliases to the new language menu (since old Settings tile
+# has been repurposed into the new Preferences submenu).
+def build_settings_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    return build_language_menu(uid)
+
+
 def build_settings_text(uid: Optional[int] = None) -> str:
-    """Header text for the Settings submenu."""
+    """Header text for the Language picker."""
     try:
         from i18n import t as _t, get_user_lang
         title = _t(uid, "settings_title") if uid else _t(None, "settings_title")
         lang_hdr = _t(uid, "settings_language_header") if uid else _t(None, "settings_language_header")
         current = get_user_lang(uid) if uid else "en"
     except Exception:
-        title = "⚙️ Settings"
+        title = "🌐 Language"
         lang_hdr = "Language"
         current = "en"
     return f"*{title}*\n\n{lang_hdr}: `{current}`"

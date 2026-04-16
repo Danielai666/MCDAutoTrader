@@ -1333,19 +1333,165 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("No exchange connected.", reply_markup=back_keyboard())
 
-    # --- Settings submenu (UI-only: language for now, extensible) ---
-    elif data == "menu_settings":
+    # --- Settings / Language picker (UI-only) ---
+    elif data in ("menu_settings", "menu_language"):
         try:
             import panel as _panel
             await query.edit_message_text(
                 _panel.build_settings_text(uid),
-                reply_markup=_panel.build_settings_keyboard(uid),
+                reply_markup=_panel.build_language_menu(uid),
                 parse_mode="Markdown",
             )
             _panel.track_panel(uid, chat_id, query.message.message_id)
         except Exception as e:
-            log.debug("menu_settings render failed: %s", e)
-            await query.edit_message_text("Settings", reply_markup=back_keyboard())
+            log.debug("menu_language render failed: %s", e)
+            await query.edit_message_text("Language", reply_markup=back_keyboard())
+
+    # --- Level-2 submenu routes (menu refactor §18.20) ---
+    elif data == "menu_risk_v2":
+        import panel as _panel
+        await query.edit_message_text(
+            "🎯 Risk", reply_markup=_panel.build_risk_menu(uid))
+
+    elif data == "menu_ai":
+        import panel as _panel
+        await query.edit_message_text(
+            "🧠 AI / Analysis", reply_markup=_panel.build_ai_menu(uid))
+
+    elif data == "menu_trial":
+        import panel as _panel
+        await query.edit_message_text(
+            "🧪 Trial Mode", reply_markup=_panel.build_trial_menu(uid))
+
+    elif data == "menu_account":
+        import panel as _panel
+        await query.edit_message_text(
+            "👤 Account", reply_markup=_panel.build_account_menu(uid))
+
+    elif data == "menu_preferences":
+        import panel as _panel
+        await query.edit_message_text(
+            "⚙️ Preferences", reply_markup=_panel.build_preferences_menu(uid))
+
+    # Legacy menu_mode wrapper now includes trading actions (sell / panic / go_live)
+    # so users don't need to hunt for them on the main grid.
+    elif data == "menu_mode":
+        import panel as _panel
+        await query.edit_message_text(
+            "⚙️ Trading Mode", reply_markup=_panel.build_trading_actions_menu(uid))
+
+    # --- Trial submenu actions (wire buttons to existing /trial subcommands) ---
+    elif data == "cmd_trial_status":
+        try:
+            import trial as _trial
+            if _trial.is_enabled():
+                await query.edit_message_text(
+                    _trial.render_status(uid), parse_mode="Markdown", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text("Trial Mode is disabled (FEATURE_TRIAL_MODE=false).", reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("cmd_trial_status failed uid=%s: %s", uid, e)
+            await query.edit_message_text("Trial status unavailable.", reply_markup=back_keyboard())
+
+    elif data == "cmd_trial_report":
+        try:
+            import trial as _trial
+            if _trial.is_enabled():
+                await query.edit_message_text(
+                    _trial.render_report(uid), parse_mode="Markdown", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text("Trial Mode is disabled.", reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("cmd_trial_report failed uid=%s: %s", uid, e)
+            await query.edit_message_text("Trial report unavailable.", reply_markup=back_keyboard())
+
+    elif data == "cmd_trial_summary":
+        try:
+            import trial as _trial
+            if _trial.is_enabled():
+                await query.edit_message_text(
+                    _trial.render_summary(uid), parse_mode="Markdown", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text("Trial Mode is disabled.", reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("cmd_trial_summary failed uid=%s: %s", uid, e)
+            await query.edit_message_text("Trial summary unavailable.", reply_markup=back_keyboard())
+
+    elif data == "cmd_trial_stop":
+        try:
+            import trial as _trial
+            if _trial.is_enabled():
+                _trial.stop_trial(uid)
+                await query.edit_message_text("Trial stopped.", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text("Trial Mode is disabled.", reply_markup=back_keyboard())
+        except Exception:
+            await query.edit_message_text("Trial stop failed.", reply_markup=back_keyboard())
+
+    # --- Portfolio button on Account submenu ---
+    elif data == "cmd_portfolio":
+        try:
+            import portfolio as _pf
+            from i18n import t as _t
+            if not _pf.is_enabled():
+                await query.edit_message_text("Portfolio is disabled (FEATURE_PORTFOLIO=false).", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text(_t(uid, "portfolio_fetching"))
+                snap = await _pf.fetch_portfolio(uid, force=True)
+                text = _pf.format_portfolio(uid, snap)
+                # Telegram text limit ~4096; truncate if necessary
+                if len(text) > 3900:
+                    text = text[:3900] + "…"
+                await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("cmd_portfolio (callback) failed uid=%s: %s", uid, e)
+            await query.edit_message_text(_safe_exchange_error(e), reply_markup=back_keyboard())
+
+    # --- Input prompts (Level-3 text-input flows) ---
+    elif data == "prompt_capital":
+        from i18n import t as _t
+        PENDING_INPUT[uid] = {"type": "capital", "chat_id": chat_id}
+        await query.edit_message_text(_t(uid, "enter_capital"), reply_markup=back_keyboard())
+
+    elif data == "prompt_maxexposure":
+        from i18n import t as _t
+        PENDING_INPUT[uid] = {"type": "maxexposure", "chat_id": chat_id}
+        await query.edit_message_text(_t(uid, "enter_maxexposure"), reply_markup=back_keyboard())
+
+    elif data == "prompt_trial_start":
+        from i18n import t as _t
+        PENDING_INPUT[uid] = {"type": "trial_start", "chat_id": chat_id}
+        await query.edit_message_text(_t(uid, "enter_trial_capital"), reply_markup=back_keyboard())
+
+    # --- Confirmation prompts for sensitive actions ---
+    elif data == "confirm_sellnow":
+        from i18n import t as _t
+        import panel as _panel
+        await query.edit_message_text(
+            _t(uid, "confirm_sellnow_prompt"),
+            reply_markup=_panel.build_confirm_menu(uid, "cmd_sellnow", "cmd_menu"))
+
+    elif data == "confirm_panic":
+        from i18n import t as _t
+        import panel as _panel
+        await query.edit_message_text(
+            _t(uid, "confirm_panic_prompt"),
+            reply_markup=_panel.build_confirm_menu(uid, "cmd_panic_stop", "cmd_menu"))
+
+    elif data == "confirm_disconnect":
+        from i18n import t as _t
+        import panel as _panel
+        await query.edit_message_text(
+            _t(uid, "confirm_disconnect_prompt"),
+            reply_markup=_panel.build_confirm_menu(uid, "cmd_disconnect", "cmd_menu"))
+
+    # --- Preferences (risk profiles + future placeholders) ---
+    elif data in ("pref_conservative", "pref_balanced", "pref_aggressive",
+                  "pref_notifications", "pref_voice"):
+        # UI structure in place; concrete behaviour requires design decisions
+        # on specific risk_per_trade / max_exposure / alert thresholds per profile.
+        from i18n import t as _t
+        await query.edit_message_text(_t(uid, "coming_soon"), reply_markup=back_keyboard())
 
     elif data in ("settings_lang_en", "settings_lang_fa"):
         new_lang = "fa" if data == "settings_lang_fa" else "en"
@@ -1548,6 +1694,39 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif ptype == "trail":
         set_manual_guard(uid, SETTINGS.PAIR, sl=None, tp=None, trail_pct=val)
         await update.message.reply_text(f"✅ Trailing set at {val*100:.2f}%", reply_markup=back_keyboard())
+    # --- Menu-refactor prompt types (§18.20) ---
+    elif ptype == "capital":
+        if val <= 0:
+            await update.message.reply_text("❌ Capital must be positive.", reply_markup=back_keyboard())
+            return
+        execute("UPDATE users SET capital_usd=? WHERE user_id=?", (val, uid))
+        await update.message.reply_text(f"✅ Capital set to ${val:,.2f}", reply_markup=back_keyboard())
+    elif ptype == "maxexposure":
+        if not 0 < val <= 1.0:
+            await update.message.reply_text("❌ Must be between 0 and 1.0 (e.g. 0.4 for 40%).", reply_markup=back_keyboard())
+            return
+        execute("UPDATE users SET max_portfolio_exposure=? WHERE user_id=?", (val, uid))
+        await update.message.reply_text(f"✅ Max exposure set to {val*100:.0f}%", reply_markup=back_keyboard())
+    elif ptype == "trial_start":
+        if val <= 0:
+            await update.message.reply_text("❌ Trial capital must be positive.", reply_markup=back_keyboard())
+            return
+        try:
+            import trial as _trial
+            from i18n import t as _t
+            if not _trial.is_enabled():
+                await update.message.reply_text("Trial Mode is disabled (FEATURE_TRIAL_MODE=false).", reply_markup=back_keyboard())
+                return
+            ok = _trial.start_trial(uid, val, 14)
+            if ok:
+                await update.message.reply_text(
+                    f"{_t(uid, 'trial_started')} (${val:,.2f}, 14 days)",
+                    reply_markup=back_keyboard())
+            else:
+                await update.message.reply_text(_t(uid, "trial_invalid_capital"), reply_markup=back_keyboard())
+        except Exception as e:
+            log.warning("trial_start prompt failed uid=%s: %s", uid, e)
+            await update.message.reply_text("Trial start failed. Try again.", reply_markup=back_keyboard())
 
 # ---------------------------
 # Original command handlers (still work if typed)
