@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `92caad2` (UI — multi-level menu refactor: 12-tile L1 + 7 L2 submenus + confirm flows)
+> Latest commit: `0edd958` (UI clarity — Quick Actions row, category previews, dual-nav footer, improved labels)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1049,6 +1049,55 @@ All three use the existing `PENDING_INPUT` dict + `text_input_handler` machinery
 
 **Commit:** `92caad2`.
 
+### 18.21 UI clarity pass — Quick Actions, category previews, dual-nav footer, improved labels
+
+User feedback after menu refactor: "you removed many of options" — observational reaction to the cleaner layout. User then specified a discoverability enhancement pass that explicitly kept the simplified structure but added clarity. Scope-locked: no features added, no logic changed, no buttons removed.
+
+**Main panel — now 5 rows:**
+- Row 0: ⚡ Quick Actions (Status · Signal · Positions · 🛑 Panic) — spec §5, always visible at top
+- Rows 1–4: 12 category tiles (unchanged from §18.20, spec §1)
+
+Status/Signal/Positions appear in both Quick Actions and category tiles by design per spec §1+§5 — same callbacks, dual discoverability paths.
+
+**Label improvements (spec §3):**
+- AI → `🧠 AI & Analysis`
+- Settings → `⚙️ Settings & Strategy`
+- Account → `👤 Account & Portfolio`
+- Pairs → `🌐 Markets & Pairs`
+- AutoTrade → `🤖 Auto` (shortened to fix observed truncation `A...rade` on narrow screens — not in spec but visually broken)
+
+**Preview block in panel text (spec §4):**
+Previews can't live on Telegram inline buttons (single-line text only), so added a `_Categories:_` section in the message body above the keyboard:
+```
+🎯 Risk  → Limits · SL/TP · Exposure
+🧠 AI & Analysis  → Signals · Insights · Charts
+🧪 Trial  → Start · Status · Report
+🌐 Markets  → Active · Add · Ranking
+```
+Honest trade-off: text-based previews, not button-embedded. User spec said "preview under buttons" which is impossible with inline keyboards — message-text is the closest faithful implementation.
+
+**Context hint (spec §2):**
+Panel now ends with `👇 Select a category to continue` (EN) or `👇 یک بخش را انتخاب کنید` (FA). Replaces the old generic "Select an action:".
+
+**Dual-nav footer (spec §6):**
+Every submenu ends with:
+```
+⬅️ Back     🏠 Main Menu
+```
+Both currently point to `cmd_menu` (shallow hierarchy). Separate buttons signal user intent clearly and are forward-compatible with deeper future nesting.
+
+**i18n delta:**
+14 new keys added to both EN and FA (`btn_home`, `select_category_hint`, `previews_title`, four short-names, four preview strings, three quick-action labels). Plus 7 existing button keys updated (`btn_ai`, `btn_autotrade`, `btn_account`, `btn_pairs`, `btn_settings`, `btn_panic`, `btn_risk`) in both locales to match new labels.
+
+**Strictly preserved:**
+- No features removed
+- No `callback_data` values changed or removed
+- No logic / risk / execution / DB changes
+- All typed slash commands still work unchanged
+- Safety layer unchanged — auto-applies to new menu paths via `button_callback`
+
+**Commit:** `0edd958`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1061,8 +1110,8 @@ All three use the existing `PENDING_INPUT` dict + `text_input_handler` machinery
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `92caad2` (menu refactor — 12-tile L1 + 7 L2 submenus + confirm flows for sensitive actions) |
-| `FEATURE_CONTROL_PANEL` | `true` — 12-tile L1 main panel + 7 L2 submenus (Risk/AI/Trial/Account/Mode/Preferences/Language) + L3 text-input prompts + confirmation flows for Sell/Panic/Disconnect + dynamic header + exchange-connection indicator |
+| Latest commit | `0edd958` (UI clarity — Quick Actions row, category previews, dual-nav footer, improved labels) |
+| `FEATURE_CONTROL_PANEL` | `true` — Quick Actions row + 12 category tiles + 7 L2 submenus + category previews in header + dual-nav footers + confirmation flows + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
 | `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
