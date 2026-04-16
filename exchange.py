@@ -1,11 +1,39 @@
 # exchange.py
-# Exchange abstraction layer — split into public (shared) and authenticated (per-user) paths
+# Exchange abstraction layer — split into public (shared) and authenticated (per-user) paths.
+#
+# Ownership model (enforced — see §18.25):
+#   • Public (read-only) functions use an unauthenticated shared CCXT client.
+#   • Authenticated functions (orders, balance, cancels) MUST use per-user
+#     credentials from UserContext. There is NO silent fallback to the
+#     platform owner's SETTINGS.KRAKEN_* keys for regular users.
+#   • The legacy ctx=None branch (which used global keys) is explicitly
+#     guarded by REQUIRE_PER_USER_CREDS — it raises NoCredentialsError
+#     unless the caller opts in via allow_global=True (admin-only).
 import logging
 import ccxt
 import pandas as pd
 from config import SETTINGS
 
 log = logging.getLogger(__name__)
+
+
+class NoCredentialsError(Exception):
+    """Raised when an authenticated exchange call is attempted without
+    per-user credentials. Callers should convert this into a user-friendly
+    'Live trading requires your own exchange connection' message."""
+    pass
+
+
+def _has_per_user_creds(ctx) -> bool:
+    """Belt-and-braces check: has_exchange_keys property + direct string test."""
+    if ctx is None:
+        return False
+    try:
+        if hasattr(ctx, "has_exchange_keys"):
+            return bool(ctx.has_exchange_keys)
+    except Exception:
+        pass
+    return bool(getattr(ctx, "exchange_key", None)) and bool(getattr(ctx, "exchange_secret", None))
 
 _public_client = None
 
@@ -74,15 +102,34 @@ def validate_pair_on_exchange(pair):
 # -------------------------------------------------------------------
 # Authenticated functions (need UserContext or fallback to SETTINGS)
 # -------------------------------------------------------------------
-def place_market_order(pair, side, amount, ctx=None):
-    """Place market order. Uses ctx credentials if provided, else global SETTINGS."""
+def place_market_order(pair, side, amount, ctx=None, allow_global=False):
+    """Place market order.
+
+    Ownership enforcement (§18.25):
+      - `ctx.paper_trading=True`: mock-fill returned, no exchange touched.
+      - `ctx` with per-user creds: routes via user's CCXT client.
+      - `ctx` without per-user creds (live): raises NoCredentialsError.
+      - `ctx=None, PAPER_TRADING=True` (global paper): mock-fill.
+      - `ctx=None, PAPER_TRADING=False, allow_global=False`: refused.
+        Only admin-level callers may opt into global-key trading by
+        passing `allow_global=True`.
+    """
     if ctx:
         if ctx.paper_trading:
             return {'id': f'paper-{pair}-{side}', 'status': 'filled', 'side': side, 'amount': amount}
+        if not _has_per_user_creds(ctx):
+            raise NoCredentialsError(
+                f"Live trade blocked: user {getattr(ctx, 'user_id', '?')} has no exchange credentials."
+            )
         ex = get_user_client(ctx)
     elif SETTINGS.PAPER_TRADING:
         return {'id': f'paper-{pair}-{side}', 'status': 'filled', 'side': side, 'amount': amount}
     else:
+        if not allow_global:
+            raise NoCredentialsError(
+                "Live trade blocked: no user context and allow_global=False. "
+                "Regular users must use their own exchange credentials."
+            )
         ex = getattr(ccxt, SETTINGS.EXCHANGE)({
             'enableRateLimit': True,
             'apiKey': SETTINGS.KRAKEN_API_KEY or None,
@@ -91,14 +138,22 @@ def place_market_order(pair, side, amount, ctx=None):
     return ex.create_order(symbol=pair, type='market', side=side.lower(), amount=amount)
 
 
-def cancel_order(order_id, pair, ctx=None):
+def cancel_order(order_id, pair, ctx=None, allow_global=False):
     if ctx:
         if ctx.paper_trading:
             return {'id': order_id, 'status': 'cancelled'}
+        if not _has_per_user_creds(ctx):
+            raise NoCredentialsError(
+                f"Cancel blocked: user {getattr(ctx, 'user_id', '?')} has no exchange credentials."
+            )
         ex = get_user_client(ctx)
     elif SETTINGS.PAPER_TRADING:
         return {'id': order_id, 'status': 'cancelled'}
     else:
+        if not allow_global:
+            raise NoCredentialsError(
+                "Cancel blocked: no user context and allow_global=False."
+            )
         ex = getattr(ccxt, SETTINGS.EXCHANGE)({
             'enableRateLimit': True,
             'apiKey': SETTINGS.KRAKEN_API_KEY or None,
@@ -107,14 +162,22 @@ def cancel_order(order_id, pair, ctx=None):
     return ex.cancel_order(order_id, symbol=pair)
 
 
-def get_balance(currency='USDC', ctx=None):
+def get_balance(currency='USDC', ctx=None, allow_global=False):
     if ctx:
         if ctx.paper_trading:
             return ctx.capital_usd
+        if not _has_per_user_creds(ctx):
+            raise NoCredentialsError(
+                f"Balance blocked: user {getattr(ctx, 'user_id', '?')} has no exchange credentials."
+            )
         ex = get_user_client(ctx)
     elif SETTINGS.PAPER_TRADING:
         return SETTINGS.CAPITAL_USD
     else:
+        if not allow_global:
+            raise NoCredentialsError(
+                "Balance blocked: no user context and allow_global=False."
+            )
         ex = getattr(ccxt, SETTINGS.EXCHANGE)({
             'enableRateLimit': True,
             'apiKey': SETTINGS.KRAKEN_API_KEY or None,

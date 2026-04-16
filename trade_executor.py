@@ -159,6 +159,24 @@ def execute_autonomous_trade(pair: str, side: str, qty: float, price: float,
     mode = 'PAPER' if is_paper else 'LIVE'
     uid = ctx.user_id if ctx else None
 
+    # §18.25 — Per-user credential gate for live orders. Never attempt a
+    # live order if the user hasn't supplied their own exchange credentials.
+    # This protects the platform owner from incidental order routing and
+    # gives the caller a clean error without polluting the DB with FAILED
+    # trades from users who forgot to run /connect.
+    if not is_paper and ctx is not None:
+        has_keys = bool(getattr(ctx, "exchange_key", None)) and bool(getattr(ctx, "exchange_secret", None))
+        if hasattr(ctx, "has_exchange_keys"):
+            try:
+                has_keys = bool(ctx.has_exchange_keys)
+            except Exception:
+                pass
+        if not has_keys:
+            log.warning("Live trade blocked uid=%s pair=%s: no per-user credentials", uid, pair)
+            _clear_execution_lock(pair, side)
+            return {'success': False, 'trade_id': 0, 'order_id': None,
+                    'mode': mode, 'error': 'NO_CREDENTIALS'}
+
     try:
         # 2. Create DB record with PENDING status
         now = int(time.time())
@@ -257,6 +275,20 @@ def execute_autonomous_exit(pair: str, reason: str = "AI_EXIT", ctx=None) -> dic
     errors = []
     total_pnl = 0.0
     closed = 0
+
+    # §18.25 — block live exits if user lacks per-user creds (same rationale
+    # as execute_autonomous_trade — never fall back to owner account).
+    if not is_paper and ctx is not None:
+        has_keys = bool(getattr(ctx, "exchange_key", None)) and bool(getattr(ctx, "exchange_secret", None))
+        if hasattr(ctx, "has_exchange_keys"):
+            try:
+                has_keys = bool(ctx.has_exchange_keys)
+            except Exception:
+                pass
+        if not has_keys:
+            log.warning("Live exit blocked uid=%s pair=%s: no per-user credentials", uid, pair)
+            return {'success': False, 'closed_count': 0, 'total_pnl': 0,
+                    'mode': mode, 'errors': ['NO_CREDENTIALS']}
 
     try:
         px = market_price(pair)

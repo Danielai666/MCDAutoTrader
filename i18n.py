@@ -237,6 +237,9 @@ TEXT = {
         "btn_refresh": "🔄 Refresh",
         "yes": "Yes",
         "no": "No",
+        "account_ai_service": "AI Service",
+        "account_ai_platform_provided": "Platform Provided",
+        "account_status_ai_shared": "✅ AI service provided by platform",
 
         # --- Settings submenu ---
         "settings_title": "⚙️ Settings",
@@ -491,6 +494,9 @@ TEXT = {
         "btn_refresh": "🔄 بروزرسانی",
         "yes": "بله",
         "no": "خیر",
+        "account_ai_service": "سرویس AI",
+        "account_ai_platform_provided": "ارائه شده توسط پلتفرم",
+        "account_status_ai_shared": "✅ سرویس AI توسط پلتفرم تأمین می‌شود",
 
         # --- Settings submenu ---
         "settings_title": "⚙️ تنظیمات",

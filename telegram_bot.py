@@ -864,15 +864,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📝 Mode set to PAPER.", reply_markup=back_keyboard())
 
     elif data == "cmd_mode_live":
-        # Live mode is gated by LIVE_TRADE_ALLOWED_IDS (approval list),
-        # not by admin_only — users who aren't approved simply can't flip live.
+        # Live mode requires TWO independent gates (§18.25):
+        #   1. LIVE_TRADE_ALLOWED_IDS (operator approval)
+        #   2. Per-user exchange credentials must exist (user owns their trading)
+        # Without #2 we would either fail at CCXT level or (worse) risk
+        # mis-configuration fallbacks. Block early with a clear message.
         if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
             await query.edit_message_text(
                 "⛔ Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.",
                 reply_markup=back_keyboard())
         else:
-            execute("UPDATE users SET trade_mode='LIVE' WHERE user_id=?", (uid,))
-            await query.edit_message_text("🔴 Mode set to LIVE.", reply_markup=back_keyboard())
+            # Per-user credential gate
+            try:
+                from storage import get_credential as _gc
+                cred = _gc(uid, "ccxt")
+            except Exception:
+                cred = None
+            if not cred:
+                await query.edit_message_text(
+                    "⛔ Live trading requires your own exchange connection.\n"
+                    "Tap 👤 Account → 🔌 Connect to link your exchange keys first.",
+                    reply_markup=back_keyboard())
+            else:
+                execute("UPDATE users SET trade_mode='LIVE' WHERE user_id=?", (uid,))
+                await query.edit_message_text("🔴 Mode set to LIVE.", reply_markup=back_keyboard())
 
     # --- Risk submenu ---
     elif data == "menu_risk":
@@ -1883,9 +1898,23 @@ async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m not in ("PAPER", "LIVE"):
         await update.message.reply_text("Mode must be paper or live.")
         return
-    if m == "LIVE" and uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
-        await update.message.reply_text("Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.")
-        return
+    if m == "LIVE":
+        if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
+            await update.message.reply_text("Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.")
+            return
+        # Per-user credential gate (§18.25) — live trading must use the
+        # user's own exchange account, never the platform owner's.
+        try:
+            from storage import get_credential as _gc
+            cred = _gc(uid, "ccxt")
+        except Exception:
+            cred = None
+        if not cred:
+            await update.message.reply_text(
+                "Live trading requires your own exchange connection. "
+                "Use /setkeys or 👤 Account → 🔌 Connect first."
+            )
+            return
     execute("UPDATE users SET trade_mode=? WHERE user_id=?", (m, uid))
     await update.message.reply_text(f"Mode set to {m}.", reply_markup=back_keyboard())
 
@@ -2252,13 +2281,16 @@ def _render_account_dashboard(uid: int) -> str:
         lines.append(f"{_t(uid, 'account_trial_active')}: `{_t(uid, 'no')}`")
     lines.append("")
 
-    # C) Exchange
+    # C) Exchange (user-owned) + AI Service (platform-owned)
     lines.append(f"_{_t(uid, 'account_exchange_header')}_")
     lines.append(f"{_t(uid, 'account_exchange')}: `{exch_name}`")
     conn_label = _t(uid, "account_connected") if exch_connected else _t(uid, "account_not_connected")
     lines.append(f"{_t(uid, 'account_connection')}: `{conn_label}`")
     if exch_connected:
         lines.append(f"{_t(uid, 'account_api_key')}: `{masked_key}`")
+    # Make the ownership model unambiguous: AI is shared platform resource,
+    # exchange is strictly per-user. (§18.25)
+    lines.append(f"{_t(uid, 'account_ai_service')}: `{_t(uid, 'account_ai_platform_provided')}`")
     lines.append("")
 
     # D) Settings
@@ -2276,6 +2308,7 @@ def _render_account_dashboard(uid: int) -> str:
 
     # Status block — quick green/amber/red indicators
     lines.append(f"_{_t(uid, 'account_status_header')}_")
+    lines.append(_t(uid, "account_status_ai_shared"))
     if trial_enabled and tstate and tstate.active:
         lines.append(_t(uid, "account_status_trial_active"))
     else:
