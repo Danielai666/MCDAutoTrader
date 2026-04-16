@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `ab5532b` (Safety layer v2 — active-user cap, global error wrapper, telemetry, UX)
+> Latest commit: `1c21fd7` (Stabilization — close 8 exception leaks, wrap all 49 handlers, touch all entry points)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -923,6 +923,42 @@ User marked optional; "system still works without persistence." In-memory rate l
 
 **Commit:** `ab5532b`.
 
+### 18.18 Stabilization — exception leak audit, rate-limit coverage, touch-user completeness
+
+User invoked a **strict stabilization phase**: no features, no logic changes, no architecture expansion. Objective: validate and harden what we have.
+
+Ran two targeted audits using subagents:
+1. **Exception-leak audit:** grepped every `except Exception as e:` block for raw `{e}` in user-facing messages.
+2. **Handler-coverage audit:** compared every `CommandHandler` registration in `build_app()` against the `rate_limited` wrapper, and checked `MessageHandler` registrations for `touch_user`.
+
+**Finding 1: 8 exception handlers leaked raw `{e}` to users.**
+Replaced all with static safe messages. Full exception still logged with `uid=` for operators. Zero raw `{e}` remaining in any user-facing message (grep-verified).
+
+| Handler | Old (leaking) | New (safe) |
+|---|---|---|
+| cmd_heatmap | `"Heatmap error: {e}"` | `"Heatmap render failed. Try again."` |
+| cmd_positions_card | `"Positions error: {e}"` | `"Positions render failed. Try again."` |
+| cmd_risk_board | `"Risk board error: {e}"` | `"Risk board render failed. Try again."` |
+| cmd_ai_card | `"AI card error: {e}"` | `"AI card render failed. Try again."` |
+| cmd_myaccount | `"Account error: {e}"` | `"Account load failed. Try again."` |
+| confirm_trade_* | `"Error: {e}"` | `"Trade execution error. Try again."` |
+| /backtest | `"Backtest failed: {e}"` | `"Backtest failed. Check pair and try again."` |
+| /done | `"Analysis failed: {e}"` | `"Analysis failed. Try again with fewer images."` |
+
+**Finding 2: 21 of 49 command handlers were NOT wrapped in `rate_limited`.**
+All 21 bypassed: rate limiting (burst + volume), `touch_user` (active-user tracking), `telemetry.record_command` (command counting). Fixed by wrapping all 21 handlers. Verified: 49/49 command handlers now wrapped.
+
+**Finding 3: `text_input_handler` and `screenshot_photo_handler` had no `touch_user`.**
+Added best-effort `touch_user(uid)` calls at entry to both handlers. Every user-interaction entry point is now tracked:
+- 49 command handlers (via `rate_limited` decorator)
+- 1 callback handler (`button_callback`) — direct call
+- 1 text handler (`text_input_handler`) — direct call
+- 1 photo handler (`screenshot_photo_handler`) — direct call
+
+**No trading logic, strategy, risk, execution, or DB schema changes. No features added.**
+
+**Commit:** `1c21fd7`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -935,7 +971,7 @@ User marked optional; "system still works without persistence." In-memory rate l
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `ab5532b` (safety layer v2 — active-user cap, global error wrapper, telemetry, UX) |
+| Latest commit | `1c21fd7` (stabilization — 8 exception leaks closed, 49/49 handlers wrapped, all entry points touched) |
 | `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
