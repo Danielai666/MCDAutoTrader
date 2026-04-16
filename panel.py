@@ -203,27 +203,24 @@ def _btn(uid: Optional[int], key: str, fallback: str) -> str:
 
 def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """
-    Main panel layout:
-      Row 0  — ⚡ Quick Actions (Status · Signal · Positions · 🛑 Panic)
-      Rows 1-4 — 12 category tiles (4×3 grid)
+    Main panel layout — clean 4×3 grid of category tiles.
 
-    Quick Actions appear ABOVE the main grid for one-tap access to the most
-    frequent reads + the emergency stop, without duplicating effort (tapping
-    Status here goes to the same handler as the Status tile below — the extra
-    row is discoverability, not a second code path).
+    History:
+      §18.21 added a Row-0 "⚡ Quick Actions" strip above the category grid.
+      §18.23 removed it: it duplicated Status/Signal/Positions already present
+      in Row 1 and Panic already present in the Mode submenu + bottom
+      ReplyKeyboard. The underlying callbacks remain unchanged; only the
+      duplicate rendering layer was dropped.
+
+    Access paths (per-action reachability after cleanup):
+      Status    → Row 1 tile · bottom ReplyKeyboard · /status
+      Signal    → Row 1 tile · /signal
+      Positions → Row 1 tile · /positions · /positions_card
+      Panic     → Mode submenu (confirm_panic) · bottom ReplyKeyboard · /panic_stop
+      Menu      → bottom ReplyKeyboard · /menu · every submenu's 🏠 button
     """
     rows = [
-        # Row 0 — ⚡ Quick Actions (always visible at the top)
-        # Duplicates Status/Signal/Positions from the category grid below,
-        # per spec §1+§5 — main menu keeps all 12 categories intact,
-        # Quick Actions is an additional fast-access row above.
-        [
-            InlineKeyboardButton(_btn(uid, "btn_quick_status", "⚡ Status"), callback_data="cmd_status"),
-            InlineKeyboardButton(_btn(uid, "btn_quick_signal", "⚡ Signal"), callback_data="cmd_signal"),
-            InlineKeyboardButton(_btn(uid, "btn_quick_positions", "⚡ Positions"), callback_data="cmd_positions_card"),
-            InlineKeyboardButton(_btn(uid, "btn_panic", "🛑 Panic"), callback_data="confirm_panic"),
-        ],
-        # Row 1 — Status / Signal / Positions (category tiles, same callbacks)
+        # Row 1 — Status / Signal / Positions (top category row)
         [
             InlineKeyboardButton(_btn(uid, "btn_status", "📊 Status"), callback_data="cmd_status"),
             InlineKeyboardButton(_btn(uid, "btn_signal", "📈 Signal"), callback_data="cmd_signal"),
@@ -242,9 +239,6 @@ def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="menu_account"),
         ],
         # Row 4 — Price / Health / Advanced
-        # AI, Trial, and Settings tiles moved off main panel per user spec
-        # §18.22 — still reachable via /trial, /lang, /ai, /analyze_screens
-        # slash commands. Power-user actions grouped under Advanced.
         [
             InlineKeyboardButton(_btn(uid, "btn_price", "💰 Price"), callback_data="cmd_price"),
             InlineKeyboardButton(_btn(uid, "btn_health", "💚 Health"), callback_data="cmd_health"),
