@@ -1162,24 +1162,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await app.bot.send_message(chat_id=chat_id, text="AI card render failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_myaccount":
+        # §18.24 — delegates to the shared Account Dashboard renderer so
+        # the text-only "My Account" button stays in sync with the main
+        # Account tile's inline dashboard view.
         try:
-            from user_context import UserContext
-            from crypto_utils import mask_secret
-            ctx = UserContext.load(uid)
-            lines = [
-                "My Account",
-                f"User ID: {ctx.user_id}",
-                f"Tier: {ctx.tier}",
-                f"Capital: ${ctx.capital_usd:,.2f}",
-                f"Risk/Trade: {ctx.risk_per_trade:.1%}",
-                f"Max Open: {ctx.max_open_trades}",
-                f"Mode: {ctx.trade_mode} | Paper: {'Yes' if ctx.paper_trading else 'No'}",
-                f"AutoTrade: {'ON' if ctx.autotrade_enabled else 'OFF'}",
-                f"Exchange: {ctx.exchange_name}",
-                f"API Key: {mask_secret(ctx.exchange_key) if ctx.exchange_key else 'Not set'}",
-            ]
-            await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
+            import panel as _panel
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=_render_account_dashboard(uid),
+                parse_mode="Markdown",
+                reply_markup=_panel.build_account_menu(uid),
+            )
         except Exception as e:
+            log.debug("cmd_myaccount render failed uid=%s: %s", uid, e)
             await app.bot.send_message(chat_id=chat_id, text="Account load failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_health_stats":
@@ -1364,9 +1359,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧪 Trial Mode", reply_markup=_panel.build_trial_menu(uid))
 
     elif data == "menu_account":
+        # §18.24 — Account tile now renders the full per-user dashboard
+        # (text + submenu actions) instead of a static title.
         import panel as _panel
-        await query.edit_message_text(
-            "👤 Account", reply_markup=_panel.build_account_menu(uid))
+        try:
+            await query.edit_message_text(
+                _render_account_dashboard(uid),
+                reply_markup=_panel.build_account_menu(uid),
+                parse_mode="Markdown",
+            )
+            _panel.track_panel(uid, chat_id, query.message.message_id)
+        except Exception as e:
+            log.debug("menu_account dashboard render failed uid=%s: %s", uid, e)
+            # Fallback to minimal view on any render error
+            await query.edit_message_text(
+                "👤 Account", reply_markup=_panel.build_account_menu(uid))
 
     elif data == "menu_preferences":
         import panel as _panel
@@ -2158,33 +2165,146 @@ async def setkeys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(_safe_exchange_error(e), reply_markup=back_keyboard())
 
 
-async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's account settings."""
-    uid = update.effective_user.id
+def _render_account_dashboard(uid: int) -> str:
+    """
+    Per-user Account Dashboard — unified, bilingual, safe.
+
+    Single source of truth for the Account area. Used by:
+      • `menu_account` callback (main panel → Account tile)
+      • `cmd_myaccount` callback (explicit "My Account" button)
+      • `/myaccount` slash command
+
+    Data sources (all user-scoped):
+      • users table (via UserContext.load(uid)) — mode, capital, risk,
+        language, autotrade, daily_loss_limit, max_exposure
+      • credentials table (via storage.get_credential(uid)) — connected
+        exchange + masked API key
+      • trial table (via trial.get_trial(uid)) — trial state/progress
+      • config.LIVE_TRADE_ALLOWED_IDS — live-trading allowlist
+      • i18n.t(uid, ...) — localized labels in user's chosen language
+
+    Security: never returns unmasked API keys; only masked previews.
+    """
     from user_context import UserContext
     from crypto_utils import mask_secret
+    from storage import get_credential
+    from i18n import t as _t
+
     ctx = UserContext.load(uid)
-    lines = [
-        "My Account",
-        f"User ID: {ctx.user_id}",
-        f"Username: @{ctx.tg_username}" if ctx.tg_username else "Username: -",
-        f"Tier: {ctx.tier}",
-        "",
-        f"Capital: ${ctx.capital_usd:,.2f}",
-        f"Risk/Trade: {ctx.risk_per_trade:.1%}",
-        f"Max Open: {ctx.max_open_trades}",
-        f"Daily Loss Limit: ${ctx.daily_loss_limit:,.2f}",
-        f"Max Exposure: {ctx.max_portfolio_exposure:.0%}",
-        "",
-        f"Mode: {ctx.trade_mode}",
-        f"Paper: {'Yes' if ctx.paper_trading else 'No'}",
-        f"AutoTrade: {'ON' if ctx.autotrade_enabled else 'OFF'}",
-        f"Exchange: {ctx.exchange_name}",
-        f"API Key: {mask_secret(ctx.exchange_key) if ctx.exchange_key else 'Not set'}",
-        "",
-        f"AI Policy: {ctx.ai_fusion_policy}",
-    ]
-    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
+
+    # Trial state (flag-aware)
+    try:
+        import trial as _trial
+        trial_enabled = _trial.is_enabled()
+        tstate = _trial.get_trial(uid) if trial_enabled else None
+    except Exception:
+        trial_enabled, tstate = False, None
+
+    # Exchange connection (per-user credentials)
+    cred = get_credential(uid, "ccxt")
+    exch_connected = bool(cred and cred.get("exchange_id"))
+    exch_name = cred.get("exchange_id").upper() if exch_connected else "—"
+
+    # Safe masked key preview — never the plaintext
+    masked_key = "—"
+    if exch_connected and ctx.exchange_key:
+        try:
+            masked_key = mask_secret(ctx.exchange_key)
+        except Exception:
+            masked_key = "—"
+
+    # Live-trading eligibility
+    allowed = SETTINGS.LIVE_TRADE_ALLOWED_IDS or []
+    live_allowed = uid in allowed
+
+    # Localized language label
+    try:
+        from i18n import get_user_lang
+        lang_code = get_user_lang(uid)
+    except Exception:
+        lang_code = "en"
+
+    # --- Build dashboard sections ---
+    lines = [f"*{_t(uid, 'account_dashboard_title')}*"]
+    lines.append("")
+
+    # A) Identity
+    lines.append(f"_{_t(uid, 'account_identity_header')}_")
+    lines.append(f"{_t(uid, 'account_user_id')}: `{ctx.user_id}`")
+    if ctx.tg_username:
+        lines.append(f"{_t(uid, 'account_username')}: `@{ctx.tg_username}`")
+    lines.append("")
+
+    # B) Mode / Status
+    lines.append(f"_{_t(uid, 'account_mode_header')}_")
+    lines.append(f"{_t(uid, 'account_mode')}: `{ctx.trade_mode}`")
+    at_label = _t(uid, "autotrade_on") if ctx.autotrade_enabled else _t(uid, "autotrade_off")
+    lines.append(f"{_t(uid, 'account_autotrade')}: `{at_label}`")
+    # Trial line (always shown so testers see their state clearly)
+    if trial_enabled and tstate and tstate.active:
+        day_now = min(tstate.target_days, int(tstate.days_elapsed) + 1)
+        lines.append(
+            f"{_t(uid, 'account_trial_active')}: `{_t(uid, 'yes')}`   "
+            f"{_t(uid, 'account_trial_day')}: `{day_now}/{tstate.target_days}`   "
+            f"{_t(uid, 'account_trial_capital')}: `${tstate.capital:,.2f}`"
+        )
+    else:
+        lines.append(f"{_t(uid, 'account_trial_active')}: `{_t(uid, 'no')}`")
+    lines.append("")
+
+    # C) Exchange
+    lines.append(f"_{_t(uid, 'account_exchange_header')}_")
+    lines.append(f"{_t(uid, 'account_exchange')}: `{exch_name}`")
+    conn_label = _t(uid, "account_connected") if exch_connected else _t(uid, "account_not_connected")
+    lines.append(f"{_t(uid, 'account_connection')}: `{conn_label}`")
+    if exch_connected:
+        lines.append(f"{_t(uid, 'account_api_key')}: `{masked_key}`")
+    lines.append("")
+
+    # D) Settings
+    lines.append(f"_{_t(uid, 'account_settings_header')}_")
+    lines.append(f"{_t(uid, 'account_language')}: `{lang_code.upper()}`")
+    lines.append(f"{_t(uid, 'account_capital')}: `${ctx.capital_usd:,.2f}`")
+    lines.append(f"{_t(uid, 'account_daily_limit')}: `${ctx.daily_loss_limit:,.2f}`")
+    lines.append(f"{_t(uid, 'account_max_exposure')}: `{ctx.max_portfolio_exposure*100:.0f}%`")
+    lines.append("")
+
+    # E) Live Access
+    live_label = _t(uid, "account_live_allowed") if live_allowed else _t(uid, "account_live_denied")
+    lines.append(f"{_t(uid, 'account_live_access')}: `{live_label}`")
+    lines.append("")
+
+    # Status block — quick green/amber/red indicators
+    lines.append(f"_{_t(uid, 'account_status_header')}_")
+    if trial_enabled and tstate and tstate.active:
+        lines.append(_t(uid, "account_status_trial_active"))
+    else:
+        lines.append(_t(uid, "account_status_trial_inactive"))
+    lines.append(_t(uid, "account_status_exchange_ok") if exch_connected
+                 else _t(uid, "account_status_exchange_missing"))
+    lines.append(_t(uid, "account_status_paper_mode") if ctx.trade_mode == "PAPER"
+                 else _t(uid, "account_status_live_mode"))
+    lines.append(_t(uid, "account_status_autotrade_on") if ctx.autotrade_enabled
+                 else _t(uid, "account_status_autotrade_off"))
+    lines.append(_t(uid, "account_status_live_enabled") if live_allowed
+                 else _t(uid, "account_status_live_disabled"))
+
+    return "\n".join(lines)
+
+
+async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/myaccount — opens the per-user Account Dashboard."""
+    uid = update.effective_user.id
+    try:
+        import panel as _panel
+        kb = _panel.build_account_menu(uid)
+    except Exception:
+        kb = back_keyboard()
+    await update.message.reply_text(
+        _render_account_dashboard(uid),
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
 
 
 async def golive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
