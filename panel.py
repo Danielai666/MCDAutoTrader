@@ -326,6 +326,20 @@ def build_trial_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     ])
 
 
+def build_portfolio_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Keyboard attached to /portfolio and 💼 Portfolio button outputs.
+    Quick actions users reach for right after reading the snapshot."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_btn(uid, "btn_refresh_portfolio", "🔄 Refresh"),
+                              callback_data="cmd_portfolio_refresh"),
+         InlineKeyboardButton(_btn(uid, "btn_portfolio_report", "📉 Report"),
+                              callback_data="cmd_portfolio_report"),
+         InlineKeyboardButton(_btn(uid, "btn_portfolio_history", "📈 History"),
+                              callback_data="cmd_portfolio_history")],
+        _back_row(uid),
+    ])
+
+
 def build_account_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """👤 Account submenu — the full per-user dashboard actions.
     Expanded in §18.24 with Trial/Settings shortcuts, and in §18.26 with

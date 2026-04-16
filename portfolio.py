@@ -486,72 +486,128 @@ def _signed_money(v: float) -> str:
     return f"${v:,.2f}"
 
 
+def _relative_time(ts: int, uid: Optional[int] = None) -> str:
+    """Human-friendly 'N min ago' for UX."""
+    if not ts:
+        return "—"
+    diff = int(time.time()) - int(ts)
+    if diff < 60:
+        return f"{diff} {_tr(uid, 'portfolio_seconds_ago', 'sec ago')}"
+    if diff < 3600:
+        return f"{diff // 60} {_tr(uid, 'portfolio_minutes_ago', 'min ago')}"
+    if diff < 86400:
+        return f"{diff // 3600} {_tr(uid, 'portfolio_hours_ago', 'hr ago')}"
+    return f"{diff // 86400} {_tr(uid, 'portfolio_days_ago', 'days ago')}"
+
+
+def _portfolio_insight(uid: int, snap: PortfolioSnapshot) -> str:
+    """Compact two-line insight on portfolio posture. Uses cash %
+    (stablecoin + USD) vs positions. Heuristic, honest framing."""
+    total = snap.total_value or 0.0
+    if total <= 0:
+        return ""
+    cash_pct = (snap.available_cash / total * 100.0)
+    invested_pct = 100.0 - cash_pct
+
+    if cash_pct >= 70:
+        bias_key = "portfolio_insight_conservative"
+        note_key = "portfolio_insight_conservative_note"
+    elif cash_pct >= 40:
+        bias_key = "portfolio_insight_balanced"
+        note_key = "portfolio_insight_balanced_note"
+    else:
+        bias_key = "portfolio_insight_aggressive"
+        note_key = "portfolio_insight_aggressive_note"
+
+    title = _tr(uid, "portfolio_insight_title", "🧠 Portfolio Insight")
+    bias = _tr(uid, bias_key, "Balanced")
+    note = _tr(uid, note_key, f"{invested_pct:.0f}% invested, {cash_pct:.0f}% cash")
+    return f"*{title}*\n• {bias}\n• {note}"
+
+
+# Colored-dot markers for Assets Breakdown (cycled by index)
+_ASSET_DOTS = ["🟢", "🟡", "🔵", "🟣", "🟠", "⚪", "🔴"]
+
+
 def format_portfolio(uid: int, snap: PortfolioSnapshot, max_assets: int = 10) -> str:
-    title = _tr(uid, "portfolio_title", "💼 Portfolio")
+    """Professional, visual portfolio dashboard (§18.27).
+    Presentation-only rewrite — no data model changes."""
+    title = _tr(uid, "portfolio_overview_title", "💼 Portfolio Overview")
 
     if snap.sync_status == "NO_EXCHANGE":
         return (
-            f"*{title}*\n"
-            f"{_tr(uid, 'portfolio_no_exchange', 'No exchange connected.')}\n"
-            f"{_tr(uid, 'portfolio_connect_hint', 'Use the Connect button to link your exchange.')}"
+            f"*{title}*\n\n"
+            f"🔌 {_tr(uid, 'portfolio_no_exchange', 'No exchange connected.')}\n"
+            f"_{_tr(uid, 'portfolio_connect_hint', 'Use the Connect button to link your exchange.')}_"
         )
 
     if snap.sync_status == "ERROR":
         return (
-            f"*{title}*\n"
-            f"{_tr(uid, 'portfolio_sync', 'Exchange Sync')}: `ERROR`\n"
-            f"{snap.sync_error or '—'}"
+            f"*{title}*\n\n"
+            f"⚠️ {_tr(uid, 'portfolio_sync', 'Exchange Sync')}: `ERROR`\n"
+            f"_{snap.sync_error or '—'}_"
         )
 
-    # OK path
-    when = time.strftime("%H:%M:%S", time.localtime(snap.last_sync_ts)) if snap.last_sync_ts else "—"
-    true_eq = snap.true_equity or snap.total_value
+    # OK path — clean, scannable layout
+    total = snap.total_value or 0.0
+    cash = snap.available_cash or 0.0
+    invested = snap.positions_value or 0.0
     upnl = snap.unrealized_pnl or 0.0
+    cash_pct = (cash / total * 100.0) if total > 0 else 0.0
+    invested_pct = (invested / total * 100.0) if total > 0 else 0.0
+    upnl_pct = (upnl / (total - upnl) * 100.0) if (total - upnl) != 0 else 0.0
+
+    rel_sync = _relative_time(snap.last_sync_ts, uid)
 
     lines = [
         f"*{title}*",
-        f"{_tr(uid, 'portfolio_exchange', 'Exchange')}: `{snap.exchange_id.upper()}`",
-        f"{_tr(uid, 'portfolio_sync', 'Exchange Sync')}: `OK`   _({when})_",
         "",
-        f"{_tr(uid, 'portfolio_equity', 'True Equity')}: `${true_eq:,.2f}`",
-        f"{_tr(uid, 'portfolio_total', 'Total value')}: `${snap.total_value:,.2f}`",
-        f"{_tr(uid, 'portfolio_cash', 'Available cash')}: `${snap.available_cash:,.2f}`",
-        f"{_tr(uid, 'portfolio_positions_value', 'In positions')}: `${snap.positions_value:,.2f}`",
-        f"{_tr(uid, 'portfolio_unrealized', 'Unrealized PnL')}: `{_signed_money(upnl)}`",
+        f"💰 {_tr(uid, 'portfolio_total', 'Total Value')}: `${total:,.2f}`",
+        f"💵 {_tr(uid, 'portfolio_cash', 'Cash')}: `${cash:,.2f}` _({cash_pct:.1f}%)_",
+        f"📊 {_tr(uid, 'portfolio_invested', 'Invested')}: `${invested:,.2f}` _({invested_pct:.1f}%)_",
+        "",
+        f"📈 {_tr(uid, 'portfolio_unrealized', 'Unrealized PnL')}: `{_signed_money(upnl)}` _({upnl_pct:+.2f}%)_",
+        f"🔄 {_tr(uid, 'portfolio_last_sync', 'Last Sync')}: _{rel_sync}_",
+        f"🔗 {_tr(uid, 'portfolio_exchange', 'Exchange')}: `{_tr(uid, 'account_connected', 'Connected')}` _({snap.exchange_id.upper()})_",
     ]
 
-    # Reconcile warning
+    # Reconcile warning (kept) — subtle
     if snap.reconcile_warning:
         lines.append("")
         lines.append(snap.reconcile_warning)
 
-    # Open positions section
+    # Assets Breakdown — clean separator, colored dots, allocation %
+    if snap.assets:
+        lines.append("")
+        lines.append(f"*{_tr(uid, 'portfolio_assets_breakdown', 'Assets Breakdown')}*")
+        for i, a in enumerate(snap.assets[:max_assets]):
+            dot = _ASSET_DOTS[i % len(_ASSET_DOTS)]
+            pct = (a.value_usd / total * 100.0) if total > 0 else 0.0
+            # Below-1% assets get a compact line
+            if pct < 1.0:
+                lines.append(f"{dot} `{a.symbol}` — `${a.value_usd:,.2f}`")
+            else:
+                lines.append(f"{dot} `{a.symbol}` — `${a.value_usd:,.2f}` _({pct:.1f}%)_")
+        if len(snap.assets) > max_assets:
+            lines.append(f"_… +{len(snap.assets) - max_assets} more_")
+
+    # Open positions (bot-tracked) — kept after assets
     if snap.open_positions:
         lines.append("")
-        lines.append(f"_{_tr(uid, 'portfolio_open_positions', 'Open Positions')}:_")
+        lines.append(f"*{_tr(uid, 'portfolio_open_positions', 'Open Positions')}*")
         for p in snap.open_positions[:max_assets]:
             src = "🤖" if p.source == "bot" else "📊"
             lines.append(
                 f"{src} `{p.symbol}` {p.side}  {p.size:.6f}  "
                 f"@ `${p.entry_price:,.2f}` → `${p.current_price:,.2f}`  "
-                f"{_signed_money(p.unrealized_pnl)} ({p.unrealized_pct:+.2f}%)"
+                f"{_signed_money(p.unrealized_pnl)} _({p.unrealized_pct:+.2f}%)_"
             )
-    else:
-        lines.append("")
-        lines.append(f"_{_tr(uid, 'portfolio_no_open', 'No open positions.')}_")
 
-    # Assets (with allocation %)
-    if snap.assets:
+    # Portfolio Insight (heuristic bias) — compact visual footer
+    insight = _portfolio_insight(uid, snap)
+    if insight:
         lines.append("")
-        lines.append(f"_{_tr(uid, 'portfolio_assets', 'Assets')}:_")
-        total = snap.total_value or 1.0  # guard against zero-division
-        for a in snap.assets[:max_assets]:
-            pct = (a.value_usd / total * 100.0) if total > 0 else 0.0
-            lines.append(
-                f"• `{a.symbol}`  {a.amount:.6f}  @ `${a.price_usd:,.4f}`  = `${a.value_usd:,.2f}` ({pct:.1f}%)"
-            )
-        if len(snap.assets) > max_assets:
-            lines.append(f"_... +{len(snap.assets) - max_assets} more_")
+        lines.append(insight)
 
     return "\n".join(lines)
 
@@ -596,9 +652,15 @@ def panel_summary(uid: int) -> str:
     except Exception:
         pnl_pct = "—"
     upnl = snap.unrealized_pnl or 0.0
-    line1 = f"{port_label}: `${snap.total_value:,.2f}`   {pnl_label}: `{pnl_pct}` _(1d)_"
-    line2 = f"{upnl_label}: `{_signed_money(upnl)}`"
-    return f"{line1}\n{line2}"
+    total = snap.total_value or 0.0
+    invested = snap.positions_value or 0.0
+    exposure_pct = (invested / total * 100.0) if total > 0 else 0.0
+    cash_label = _tr(uid, "portfolio_cash_short", "Cash")
+    exposure_label = _tr(uid, "portfolio_exposure_short", "Exposure")
+    line1 = f"{port_label}: `${total:,.2f}`   {cash_label}: `${snap.available_cash:,.2f}`"
+    line2 = f"{pnl_label}: `{pnl_pct}` _(1d)_   {upnl_label}: `{_signed_money(upnl)}`"
+    line3 = f"{exposure_label}: `{exposure_pct:.0f}%`"
+    return f"{line1}\n{line2}\n{line3}"
 
 
 # -------------------------------------------------------------------

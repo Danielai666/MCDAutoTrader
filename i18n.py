@@ -298,6 +298,26 @@ TEXT = {
         "btn_portfolio_report": "📉 Report",
         "btn_portfolio_history": "📈 History",
 
+        # --- §18.27 Portfolio UX polish ---
+        "portfolio_overview_title": "💼 Portfolio Overview",
+        "portfolio_invested": "Invested",
+        "portfolio_assets_breakdown": "Assets Breakdown",
+        "portfolio_last_sync": "Last Sync",
+        "portfolio_cash_short": "Cash",
+        "portfolio_exposure_short": "Exposure",
+        "portfolio_insight_title": "🧠 Portfolio Insight",
+        "portfolio_insight_conservative": "Conservative (mostly cash)",
+        "portfolio_insight_balanced": "Balanced (cash + invested)",
+        "portfolio_insight_aggressive": "Aggressive (heavily invested)",
+        "portfolio_insight_conservative_note": "Low exposure to volatility",
+        "portfolio_insight_balanced_note": "Moderate exposure",
+        "portfolio_insight_aggressive_note": "High exposure to market moves",
+        "portfolio_seconds_ago": "sec ago",
+        "portfolio_minutes_ago": "min ago",
+        "portfolio_hours_ago": "hr ago",
+        "portfolio_days_ago": "days ago",
+        "btn_refresh_portfolio": "🔄 Refresh",
+
         # --- Bottom ReplyKeyboard (persistent row above text input) ---
         "rk_menu": "Menu",
         "rk_status": "Status",
@@ -577,6 +597,26 @@ TEXT = {
         "portfolio_asset_positions": "پوزیشن‌های باز",
         "btn_portfolio_report": "📉 گزارش",
         "btn_portfolio_history": "📈 تاریخچه",
+
+        # --- §18.27 Portfolio UX polish (Farsi) ---
+        "portfolio_overview_title": "💼 نمای کلی پورتفولیو",
+        "portfolio_invested": "سرمایه‌گذاری شده",
+        "portfolio_assets_breakdown": "جزییات دارایی‌ها",
+        "portfolio_last_sync": "آخرین همگام‌سازی",
+        "portfolio_cash_short": "نقد",
+        "portfolio_exposure_short": "ریسک",
+        "portfolio_insight_title": "🧠 بینش پورتفولیو",
+        "portfolio_insight_conservative": "محافظه‌کار (عمدتاً نقد)",
+        "portfolio_insight_balanced": "متعادل (نقد + سرمایه‌گذاری)",
+        "portfolio_insight_aggressive": "تهاجمی (سرمایه‌گذاری سنگین)",
+        "portfolio_insight_conservative_note": "ریسک کم در برابر نوسانات",
+        "portfolio_insight_balanced_note": "ریسک متوسط",
+        "portfolio_insight_aggressive_note": "ریسک بالا در برابر نوسانات بازار",
+        "portfolio_seconds_ago": "ثانیه قبل",
+        "portfolio_minutes_ago": "دقیقه قبل",
+        "portfolio_hours_ago": "ساعت قبل",
+        "portfolio_days_ago": "روز قبل",
+        "btn_refresh_portfolio": "🔄 بروزرسانی",
 
         # --- Bottom ReplyKeyboard ---
         "rk_menu": "منو",

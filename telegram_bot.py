@@ -1489,12 +1489,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Portfolio history unavailable.", reply_markup=back_keyboard())
 
     # --- Portfolio button on Account submenu ---
-    elif data == "cmd_portfolio":
+    # Also handles cmd_portfolio_refresh — same logic, same force=True fetch.
+    elif data in ("cmd_portfolio", "cmd_portfolio_refresh"):
         try:
             import portfolio as _pf
+            import panel as _panel
             from i18n import t as _t
             if not _pf.is_enabled():
-                await query.edit_message_text("Portfolio is disabled (FEATURE_PORTFOLIO=false).", reply_markup=back_keyboard())
+                await query.edit_message_text(
+                    "Portfolio is disabled (FEATURE_PORTFOLIO=false).",
+                    reply_markup=back_keyboard())
             else:
                 await query.edit_message_text(_t(uid, "portfolio_fetching"))
                 snap = await _pf.fetch_portfolio(uid, force=True)
@@ -1502,7 +1506,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Telegram text limit ~4096; truncate if necessary
                 if len(text) > 3900:
                     text = text[:3900] + "…"
-                await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+                await query.edit_message_text(
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=_panel.build_portfolio_keyboard(uid),
+                )
         except Exception as e:
             log.warning("cmd_portfolio (callback) failed uid=%s: %s", uid, e)
             await query.edit_message_text(_safe_exchange_error(e), reply_markup=back_keyboard())
@@ -2973,11 +2981,13 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         snap = await _pf.fetch_portfolio(uid, force=True)
         text = _pf.format_portfolio(uid, snap)
+        import panel as _panel
+        kb = _panel.build_portfolio_keyboard(uid)
         try:
-            await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+            await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=kb)
         except Exception:
             await update.effective_chat.send_message(
-                text, parse_mode="Markdown", reply_markup=back_keyboard()
+                text, parse_mode="Markdown", reply_markup=kb
             )
     except Exception as e:
         log.error("portfolio_cmd fetch failed uid=%s: %s", uid, e)
