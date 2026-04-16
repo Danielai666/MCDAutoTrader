@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS performance_snapshots(
     total_trades INTEGER, winning_trades INTEGER, losing_trades INTEGER,
     total_pnl REAL, avg_win REAL, avg_loss REAL, win_rate REAL, expectancy REAL
 );
+CREATE TABLE IF NOT EXISTS portfolio_snapshots(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    total_value REAL,
+    cash_value REAL,
+    positions_value REAL,
+    unrealized_pnl REAL,
+    asset_summary_json TEXT,
+    exchange_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_ts
+    ON portfolio_snapshots(user_id, ts);
 CREATE TABLE IF NOT EXISTS credentials(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -231,6 +244,21 @@ CREATE TABLE IF NOT EXISTS performance_snapshots(
     avg_loss DOUBLE PRECISION, win_rate DOUBLE PRECISION,
     expectancy DOUBLE PRECISION
 );
+
+CREATE TABLE IF NOT EXISTS portfolio_snapshots(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    ts BIGINT NOT NULL,
+    total_value DOUBLE PRECISION,
+    cash_value DOUBLE PRECISION,
+    positions_value DOUBLE PRECISION,
+    unrealized_pnl DOUBLE PRECISION,
+    asset_summary_json TEXT,
+    exchange_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_ts
+    ON portfolio_snapshots(user_id, ts);
 
 CREATE TABLE IF NOT EXISTS credentials(
     id BIGSERIAL PRIMARY KEY,

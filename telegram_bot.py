@@ -1455,6 +1455,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.edit_message_text("Trial stop failed.", reply_markup=back_keyboard())
 
+    # --- Portfolio Report (7d) button on Account submenu ---
+    elif data == "cmd_portfolio_report":
+        try:
+            import portfolio as _pf
+            if not _pf.is_enabled():
+                await query.edit_message_text("Portfolio is disabled (FEATURE_PORTFOLIO=false).", reply_markup=back_keyboard())
+            else:
+                report = _pf.compute_report(uid, window_days=7)
+                await query.edit_message_text(
+                    _pf.format_report(uid, report),
+                    parse_mode="Markdown",
+                    reply_markup=back_keyboard(),
+                )
+        except Exception as e:
+            log.warning("cmd_portfolio_report failed uid=%s: %s", uid, e)
+            await query.edit_message_text(_safe_exchange_error(e), reply_markup=back_keyboard())
+
+    # --- Portfolio History button on Account submenu ---
+    elif data == "cmd_portfolio_history":
+        try:
+            import portfolio as _pf
+            if not _pf.is_enabled():
+                await query.edit_message_text("Portfolio is disabled (FEATURE_PORTFOLIO=false).", reply_markup=back_keyboard())
+            else:
+                await query.edit_message_text(
+                    _pf.format_history(uid, days=7),
+                    parse_mode="Markdown",
+                    reply_markup=back_keyboard(),
+                )
+        except Exception as e:
+            log.warning("cmd_portfolio_history failed uid=%s: %s", uid, e)
+            await query.edit_message_text("Portfolio history unavailable.", reply_markup=back_keyboard())
+
     # --- Portfolio button on Account submenu ---
     elif data == "cmd_portfolio":
         try:
@@ -2291,6 +2324,22 @@ def _render_account_dashboard(uid: int) -> str:
     # Make the ownership model unambiguous: AI is shared platform resource,
     # exchange is strictly per-user. (§18.25)
     lines.append(f"{_t(uid, 'account_ai_service')}: `{_t(uid, 'account_ai_platform_provided')}`")
+
+    # Portfolio summary (§18.26) — shown when cached snapshot exists.
+    # Cache-only read; never triggers a live fetch from the dashboard.
+    try:
+        import portfolio as _pf
+        if _pf.is_enabled():
+            snap_cached = _pf._cached_snapshot(uid)
+            if snap_cached and snap_cached.sync_status == "OK":
+                assets_n = len([a for a in (snap_cached.assets or []) if a.value_usd > 0])
+                when = time.strftime("%H:%M:%S", time.localtime(snap_cached.last_sync_ts)) if snap_cached.last_sync_ts else "—"
+                lines.append(f"{_t(uid, 'portfolio_total')}: `${snap_cached.total_value:,.2f}`   "
+                             f"{_t(uid, 'portfolio_cash')}: `${snap_cached.available_cash:,.2f}`")
+                lines.append(f"{_t(uid, 'portfolio_assets')}: `{assets_n}`   "
+                             f"_{_t(uid, 'portfolio_sync')}: {when}_")
+    except Exception:
+        pass
     lines.append("")
 
     # D) Settings
@@ -2842,6 +2891,37 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args or []
+
+    # /portfolio history [days] — value change over window, from stored snapshots
+    if args and args[0].lower() == "history":
+        days = 7
+        if len(args) >= 2:
+            raw = args[1].lower().rstrip("d")
+            try:
+                days = max(1, min(365, int(raw)))
+            except ValueError:
+                days = 7
+        await update.message.reply_text(
+            _pf.format_history(uid, days),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    # /portfolio asset <SYMBOL> — per-asset detail from cached snapshot
+    if args and args[0].lower() == "asset":
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /portfolio asset <symbol>   e.g. /portfolio asset BTC",
+                reply_markup=back_keyboard())
+            return
+        symbol = args[1]
+        await update.message.reply_text(
+            _pf.format_asset_detail(uid, symbol),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard(),
+        )
+        return
 
     # Report subcommand: /portfolio report [7d|30d|real]
     if args and args[0].lower() == "report":

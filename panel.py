@@ -328,18 +328,19 @@ def build_trial_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
 
 def build_account_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
     """👤 Account submenu — the full per-user dashboard actions.
-    Expanded in §18.24 to include Trial and Settings shortcuts so the
-    Account section becomes a one-stop hub for testers during the 2-week
-    multi-user trial. Tapping the Account tile on main panel now renders
-    the full account dashboard text + this keyboard."""
+    Expanded in §18.24 with Trial/Settings shortcuts, and in §18.26 with
+    Portfolio Report + Portfolio History. Tapping the Account tile on
+    main panel renders the full account dashboard text + this keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_btn(uid, "btn_connect", "🔌 Connect"), callback_data="cmd_connect"),
          InlineKeyboardButton(_btn(uid, "btn_disconnect", "🔌 Disconnect"), callback_data="confirm_disconnect")],
         [InlineKeyboardButton(_btn(uid, "btn_portfolio", "💼 Portfolio"), callback_data="cmd_portfolio"),
-         InlineKeyboardButton(_btn(uid, "btn_language", "🌐 Language"), callback_data="menu_language")],
+         InlineKeyboardButton(_btn(uid, "btn_portfolio_report", "📉 Report"), callback_data="cmd_portfolio_report"),
+         InlineKeyboardButton(_btn(uid, "btn_portfolio_history", "📈 History"), callback_data="cmd_portfolio_history")],
         [InlineKeyboardButton(_btn(uid, "btn_trial_shortcut", "🧪 Trial"), callback_data="menu_trial"),
-         InlineKeyboardButton(_btn(uid, "btn_settings_shortcut", "⚙️ Settings"), callback_data="menu_preferences")],
-        [InlineKeyboardButton(_btn(uid, "btn_refresh", "🔄 Refresh"), callback_data="menu_account")],
+         InlineKeyboardButton(_btn(uid, "btn_language", "🌐 Language"), callback_data="menu_language")],
+        [InlineKeyboardButton(_btn(uid, "btn_settings_shortcut", "⚙️ Settings"), callback_data="menu_preferences"),
+         InlineKeyboardButton(_btn(uid, "btn_refresh", "🔄 Refresh"), callback_data="menu_account")],
         _back_row(uid),
     ])
 

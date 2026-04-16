@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from config import SETTINGS
-from storage import get_credential, fetchall
+from storage import get_credential, fetchall, fetchone, execute
 
 log = logging.getLogger(__name__)
 
@@ -398,6 +398,11 @@ async def fetch_portfolio(uid: int, force: bool = False) -> PortfolioSnapshot:
     loop = asyncio.get_event_loop()
     snap = await loop.run_in_executor(None, _build_snapshot_sync, uid)
     _snapshot_cache[uid] = (time.time(), snap)
+    # Opportunistic snapshot save (throttled internally, only when OK status)
+    try:
+        save_snapshot(uid, snap)
+    except Exception as e:
+        log.debug("portfolio.save_snapshot after fetch failed uid=%s: %s", uid, e)
     return snap
 
 
@@ -535,13 +540,15 @@ def format_portfolio(uid: int, snap: PortfolioSnapshot, max_assets: int = 10) ->
         lines.append("")
         lines.append(f"_{_tr(uid, 'portfolio_no_open', 'No open positions.')}_")
 
-    # Assets
+    # Assets (with allocation %)
     if snap.assets:
         lines.append("")
         lines.append(f"_{_tr(uid, 'portfolio_assets', 'Assets')}:_")
+        total = snap.total_value or 1.0  # guard against zero-division
         for a in snap.assets[:max_assets]:
+            pct = (a.value_usd / total * 100.0) if total > 0 else 0.0
             lines.append(
-                f"• `{a.symbol}`  {a.amount:.6f}  @ `${a.price_usd:,.4f}`  = `${a.value_usd:,.2f}`"
+                f"• `{a.symbol}`  {a.amount:.6f}  @ `${a.price_usd:,.4f}`  = `${a.value_usd:,.2f}` ({pct:.1f}%)"
             )
         if len(snap.assets) > max_assets:
             lines.append(f"_... +{len(snap.assets) - max_assets} more_")
@@ -712,3 +719,213 @@ async def compute_report_real(uid: int, window_days: int = 7) -> PerformanceRepo
     report = await loop.run_in_executor(None, _compute_real_report_sync, uid, window_days)
     _real_report_cache[uid] = (time.time(), report)
     return report
+
+
+# -------------------------------------------------------------------
+# Portfolio snapshots (historical reporting — §18.26)
+# Lightweight per-user persistence so /portfolio history can report
+# real portfolio value change over time. Honest design:
+#   - Save snapshot only on successful live fetch_portfolio() calls
+#   - Throttle to at most once per hour per user (prevent row spam)
+#   - Only saves real exchange data (sync_status='OK'); NO_EXCHANGE /
+#     ERROR snapshots are NOT persisted
+#   - Historical data builds up from the moment a user first runs
+#     /portfolio — no faked historical values
+# -------------------------------------------------------------------
+SNAPSHOT_MIN_INTERVAL = 3600  # seconds — 1h min between saves per user
+
+
+def save_snapshot(uid: int, snap: PortfolioSnapshot) -> bool:
+    """Persist a snapshot. Returns True if saved, False if skipped
+    (throttled or non-OK state). Safe to call on every fetch; handles
+    throttling internally."""
+    if not is_enabled() or snap.sync_status != "OK":
+        return False
+    try:
+        # Throttle: skip if we already saved within last SNAPSHOT_MIN_INTERVAL
+        latest = fetchone(
+            "SELECT ts FROM portfolio_snapshots WHERE user_id=? ORDER BY ts DESC LIMIT 1",
+            (uid,),
+        )
+        if latest and latest[0] is not None:
+            if (int(time.time()) - int(latest[0])) < SNAPSHOT_MIN_INTERVAL:
+                return False
+        import json as _json
+        asset_summary = _json.dumps([
+            {"symbol": a.symbol, "amount": a.amount,
+             "price_usd": a.price_usd, "value_usd": a.value_usd}
+            for a in (snap.assets or [])
+        ])
+        execute(
+            "INSERT INTO portfolio_snapshots"
+            "(user_id, ts, total_value, cash_value, positions_value, "
+            " unrealized_pnl, asset_summary_json, exchange_id) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (uid, int(time.time()),
+             float(snap.total_value or 0), float(snap.available_cash or 0),
+             float(snap.positions_value or 0), float(snap.unrealized_pnl or 0),
+             asset_summary, snap.exchange_id or ""),
+        )
+        return True
+    except Exception as e:
+        log.debug("portfolio.save_snapshot failed uid=%s: %s", uid, e)
+        return False
+
+
+def get_oldest_snapshot_in_window(uid: int, days: int):
+    """Return (ts, total_value, cash_value) tuple for the oldest snapshot
+    within the lookback window, or None if no snapshot exists."""
+    try:
+        since = int(time.time()) - max(1, int(days)) * 86400
+        row = fetchone(
+            "SELECT ts, total_value, cash_value FROM portfolio_snapshots "
+            "WHERE user_id=? AND ts >= ? ORDER BY ts ASC LIMIT 1",
+            (uid, since),
+        )
+        return row if row else None
+    except Exception as e:
+        log.debug("portfolio.get_oldest_snapshot_in_window failed: %s", e)
+        return None
+
+
+def get_latest_snapshot(uid: int):
+    """Return (ts, total_value, cash_value) tuple for the most recent snapshot."""
+    try:
+        row = fetchone(
+            "SELECT ts, total_value, cash_value FROM portfolio_snapshots "
+            "WHERE user_id=? ORDER BY ts DESC LIMIT 1",
+            (uid,),
+        )
+        return row if row else None
+    except Exception as e:
+        log.debug("portfolio.get_latest_snapshot failed: %s", e)
+        return None
+
+
+def get_snapshot_count(uid: int) -> int:
+    try:
+        row = fetchone("SELECT COUNT(*) FROM portfolio_snapshots WHERE user_id=?", (uid,))
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
+
+
+# -------------------------------------------------------------------
+# /portfolio history render
+# -------------------------------------------------------------------
+def format_history(uid: int, days: int = 7) -> str:
+    """Render a portfolio history report for the lookback window.
+    Honest behaviour: if insufficient history, tell the user clearly —
+    never fabricate historical values."""
+    if not is_enabled():
+        return _tr(uid, "portfolio_no_exchange", "No exchange connected.")
+
+    title = _tr(uid, "portfolio_history_title", "📈 Portfolio History")
+    current = get_latest_snapshot(uid)
+    if not current:
+        return (
+            f"*{title}*  ({days}d)\n\n"
+            f"{_tr(uid, 'portfolio_history_empty', 'Portfolio history not available yet. Run /portfolio to record your first snapshot.')}"
+        )
+    oldest = get_oldest_snapshot_in_window(uid, days)
+    # If no snapshot in window, use earliest overall
+    if not oldest:
+        try:
+            row = fetchone(
+                "SELECT ts, total_value, cash_value FROM portfolio_snapshots "
+                "WHERE user_id=? ORDER BY ts ASC LIMIT 1",
+                (uid,),
+            )
+            oldest = row if row else None
+        except Exception:
+            oldest = None
+    cur_ts, cur_val, cur_cash = int(current[0]), float(current[1] or 0), float(current[2] or 0)
+
+    if not oldest or oldest[0] == current[0]:
+        # Only one snapshot exists — report just the current value
+        n_snaps = get_snapshot_count(uid)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(cur_ts))
+        return (
+            f"*{title}*  ({days}d)\n\n"
+            f"{_tr(uid, 'portfolio_history_first', 'First snapshot recorded')} _({when})_\n"
+            f"{_tr(uid, 'portfolio_total', 'Total value')}: `${cur_val:,.2f}`\n"
+            f"{_tr(uid, 'portfolio_cash', 'Available cash')}: `${cur_cash:,.2f}`\n"
+            f"_{_tr(uid, 'portfolio_history_insufficient', 'Not enough history for change calc. Check back later.')}_\n"
+            f"_{_tr(uid, 'portfolio_snapshot_count', 'Snapshots stored')}: {n_snaps}_"
+        )
+
+    old_ts, old_val, old_cash = int(oldest[0]), float(oldest[1] or 0), float(oldest[2] or 0)
+    delta = cur_val - old_val
+    roi = (delta / old_val * 100.0) if old_val > 0 else 0.0
+    span_hours = (cur_ts - old_ts) / 3600.0
+    span_days = span_hours / 24.0
+
+    old_when = time.strftime("%Y-%m-%d %H:%M", time.localtime(old_ts))
+    cur_when = time.strftime("%Y-%m-%d %H:%M", time.localtime(cur_ts))
+    n_snaps = get_snapshot_count(uid)
+
+    lines = [
+        f"*{title}*  ({days}d)",
+        "",
+        f"{_tr(uid, 'portfolio_history_from', 'From')}: `{old_when}`",
+        f"{_tr(uid, 'portfolio_history_to', 'To')}: `{cur_when}`",
+        f"{_tr(uid, 'portfolio_history_span', 'Span')}: `{span_days:.1f}d`",
+        "",
+        f"{_tr(uid, 'portfolio_history_start_value', 'Start value')}: `${old_val:,.2f}`",
+        f"{_tr(uid, 'portfolio_history_end_value', 'End value')}: `${cur_val:,.2f}`",
+        f"{_tr(uid, 'portfolio_history_change', 'Change')}: `{_signed_money(delta)}` ({roi:+.2f}%)",
+        "",
+        f"_{_tr(uid, 'portfolio_snapshot_count', 'Snapshots stored')}: {n_snaps}_",
+    ]
+    return "\n".join(lines)
+
+
+# -------------------------------------------------------------------
+# /portfolio asset <symbol> render
+# -------------------------------------------------------------------
+def format_asset_detail(uid: int, symbol: str, snap: Optional[PortfolioSnapshot] = None) -> str:
+    """Render detail for a single asset from the latest cached snapshot,
+    or from a provided snapshot. Read-only, no exchange call inside."""
+    if not is_enabled():
+        return _tr(uid, "portfolio_no_exchange", "No exchange connected.")
+
+    if snap is None:
+        snap = _cached_snapshot(uid)
+    if not snap or snap.sync_status != "OK":
+        return _tr(uid, "portfolio_asset_need_sync", "Run /portfolio first to load wallet data.")
+
+    sym = (symbol or "").upper().strip()
+    match = None
+    for a in snap.assets or []:
+        if a.symbol.upper() == sym:
+            match = a
+            break
+
+    title = f"*{_tr(uid, 'portfolio_asset_title', '💎 Asset Detail')}: `{sym}`*"
+    if not match:
+        return f"{title}\n\n_{_tr(uid, 'portfolio_asset_not_found', 'Asset not in your wallet.')}_"
+
+    total = snap.total_value or 1.0
+    pct = (match.value_usd / total * 100.0) if total > 0 else 0.0
+
+    lines = [
+        title,
+        "",
+        f"{_tr(uid, 'portfolio_asset_amount', 'Amount')}: `{match.amount:.8f}`",
+        f"{_tr(uid, 'portfolio_asset_price', 'Price (USD)')}: `${match.price_usd:,.4f}`",
+        f"{_tr(uid, 'portfolio_asset_value', 'Value (USD)')}: `${match.value_usd:,.2f}`",
+        f"{_tr(uid, 'portfolio_asset_alloc', 'Allocation')}: `{pct:.2f}%`",
+    ]
+    # Include any open positions on this symbol (bot-tracked)
+    own_positions = [p for p in (snap.open_positions or [])
+                     if _base_asset(p.symbol) == sym]
+    if own_positions:
+        lines.append("")
+        lines.append(f"_{_tr(uid, 'portfolio_asset_positions', 'Open positions')}:_")
+        for p in own_positions:
+            lines.append(
+                f"• `{p.symbol}` {p.side}  {p.size:.6f}  "
+                f"@ `${p.entry_price:,.2f}` → `${p.current_price:,.2f}`  "
+                f"{_signed_money(p.unrealized_pnl)} ({p.unrealized_pct:+.2f}%)"
+            )
+    return "\n".join(lines)
