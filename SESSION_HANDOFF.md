@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `571b7c8` (Account — per-user dashboard for multi-user trial testing)
+> Latest commit: `5dc1308` (Ownership model — shared AI + strictly per-user exchange credentials enforced)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1270,6 +1270,52 @@ User spec: the bot will be given to real users for a 2-week trial. The Account s
 
 **Commit:** `571b7c8`.
 
+### 18.25 Ownership model — shared AI + strictly per-user exchange credentials
+
+User spec: the platform provides shared AI/API infrastructure (owner-paid), but trading accounts, credentials, balances, and live funds belong strictly per-user. No user may ever trade on the owner's exchange account under any default code path.
+
+**Audit first, fix second.** Ran a comprehensive security audit (subagent) across `exchange.py`, `trade_executor.py`, `scheduler.py`, `ccxt_provider.py`, `config.py`, `user_context.py`, `portfolio.py`, `reconcile.py`, and `validators.py`. Reported findings:
+
+✅ **No leak in the scheduler path** — `scheduler.execute_autonomous_trade` always passes `ctx=UserContext.load(uid)`; `place_market_order(ctx=ctx)` never falls back to global keys when ctx is provided.
+
+⚠️ **Three hardening gaps** identified (not active exploits, but fragile):
+1. `telegram_bot.py` `cmd_mode_live` + `/mode live` — allowed LIVE mode flip without verifying per-user credentials exist.
+2. `trade_executor.py` `execute_autonomous_trade` + `execute_autonomous_exit` — no pre-flight credential check; would reach CCXT and fail with `AuthenticationError`, leaving FAILED DB rows.
+3. `exchange.py` `place_market_order` / `cancel_order` / `get_balance` — the legacy `ctx=None` branch created an unauthenticated CCXT client using `SETTINGS.KRAKEN_*` global keys. Unreachable from scheduler by convention, but fragile.
+
+**Gates added (belt-and-braces enforcement):**
+
+| File | Change |
+|---|---|
+| `exchange.py` | New `NoCredentialsError` + `_has_per_user_creds(ctx)` helper. `place_market_order`/`cancel_order`/`get_balance` raise `NoCredentialsError` if ctx is live but lacks keys. The legacy `ctx=None + PAPER_TRADING=false` path is refused unless caller explicitly passes `allow_global=True` (admin-only opt-in). Owner's `SETTINGS.KRAKEN_*` is now unreachable without that explicit flag. |
+| `trade_executor.py` | Pre-flight credential check at the top of `execute_autonomous_trade` and `execute_autonomous_exit`. Live + no-keys returns `{'success': False, 'error': 'NO_CREDENTIALS'}` **without creating a FAILED DB row** — prevents pollution from users who flipped LIVE before uploading keys. |
+| `telegram_bot.py` | Both `/mode live` and `cmd_mode_live` callback now require two independent gates: `LIVE_TRADE_ALLOWED_IDS` (operator approval, existing) + per-user credentials in `credentials` table (new). Clear error shown to user pointing at the Connect flow. |
+
+**Account dashboard update (spec §5):** Exchange section now shows `AI Service: Platform Provided` line, and the Status block includes `✅ AI service provided by platform`. Ownership split is unambiguous in the user-facing UI: shared AI, strictly-per-user exchange.
+
+**i18n:** 3 new keys per locale (`account_ai_service`, `account_ai_platform_provided`, `account_status_ai_shared`).
+
+**Verification (runtime simulation, 7/7 gates pass):**
+- Paper path: mock-fill returned, no exchange touched
+- Live without creds → `NoCredentialsError` raised with clear message
+- Live with creds → passes credential gate, reaches CCXT normally
+- `ctx=None + PAPER_TRADING=false` → refused without `allow_global=True`
+- `execute_autonomous_trade` (live, no creds) → returns `NO_CREDENTIALS`, no DB row created
+- `execute_autonomous_trade` (paper, no creds) → mock-fill OK
+- Account dashboard shows AI Service + ownership indicators
+
+**Business model invariants now enforced in code (not convention):**
+1. Shared AI/API resources → allowed (unchanged)
+2. Per-user exchange credentials → required for any live order
+3. Owner's `SETTINGS.KRAKEN_*` → unreachable without explicit `allow_global=True`
+4. Trial/paper users with no creds → continue working normally (paper mode never touches CCXT)
+
+**Untouched:** No changes to trading strategy, risk engine, AI fusion, signal pipeline, DB schema, multi-user isolation (already correct), rate limiter, telemetry, control panel refresh, or safety layer.
+
+**Files touched:** `exchange.py`, `trade_executor.py`, `telegram_bot.py`, `i18n.py` (4 files; 147 insertions, 13 deletions)
+
+**Commit:** `5dc1308`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1282,7 +1328,7 @@ User spec: the bot will be given to real users for a 2-week trial. The Account s
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `571b7c8` (Account — per-user dashboard for multi-user trial testing) |
+| Latest commit | `5dc1308` (Ownership model — shared AI + strictly per-user exchange credentials enforced) |
 | `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
