@@ -80,12 +80,27 @@ def _check_rate_limit(uid: int, limit: int = None, window: int = None) -> bool:
 
 
 def rate_limited(func):
-    """Decorator: applies per-user dual-window rate limiting to handlers."""
+    """Decorator: applies per-user dual-window rate limiting to handlers.
+    On acceptance, also:
+      - Touches users.last_seen_ts (for the active-user cap + telemetry)
+      - Increments the in-memory command counter (telemetry.commands_per_minute)
+    """
     async def wrapper(update: Update, context):
         uid = update.effective_user.id
         if not _check_rate_limit(uid):
-            await update.message.reply_text("Too many requests, slow down.")
+            await update.message.reply_text("⚠️ Too many requests. Please wait a few seconds.")
             return
+        # Best-effort side effects — never block a valid command
+        try:
+            from storage import touch_user
+            touch_user(uid)
+        except Exception:
+            pass
+        try:
+            import telemetry as _tel
+            _tel.record_command(uid)
+        except Exception:
+            pass
         return await func(update, context)
     wrapper.__name__ = func.__name__
     return wrapper
@@ -119,15 +134,17 @@ def _safe_exchange_error(e: Exception) -> str:
 # MAX_ACTIVE_USERS soft cap
 # ---------------------------
 def _is_over_user_cap() -> bool:
-    """True when the total registered users exceeds MAX_ACTIVE_USERS.
+    """True when the number of ACTIVE users exceeds MAX_ACTIVE_USERS.
+    Active = interacted in last 24h OR has autotrade_enabled=1.
+    This is what actually consumes resources — total registered users
+    (including dormant accounts from 6 months ago) isn't a useful signal.
     Called on /start to steer new users to paper-only safely."""
     try:
         cap = SETTINGS.MAX_ACTIVE_USERS
         if cap <= 0:
             return False
-        row = fetchone("SELECT COUNT(*) FROM users")
-        cur = int(row[0]) if row and row[0] is not None else 0
-        return cur >= cap
+        import telemetry as _tel
+        return _tel.active_users() >= cap
     except Exception:
         return False
 
@@ -623,7 +640,8 @@ async def _do_price(app, chat_id):
         p = t.get("last") or t.get("close")
         await app.bot.send_message(chat_id=chat_id, text=f"💰 {SETTINGS.PAIR}: ${float(p):,.2f}", reply_markup=back_keyboard())
     except Exception as e:
-        await app.bot.send_message(chat_id=chat_id, text=f"Price fetch failed: {e}", reply_markup=back_keyboard())
+        log.warning("_do_price failed: %s", e)
+        await app.bot.send_message(chat_id=chat_id, text=_safe_exchange_error(e), reply_markup=back_keyboard())
 
 async def _do_status(app, chat_id, uid):
     row = fetchone(
@@ -753,9 +771,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # Rate limit
+    # Rate limit (callback taps count toward the same dual-window budget)
     if not _check_rate_limit(uid):
-        await query.edit_message_text("Rate limit exceeded. Try again in a moment.")
+        await query.edit_message_text("⚠️ Too many requests. Please wait a few seconds.")
         try:
             import panel as _panel
             if _panel.is_enabled():
@@ -763,6 +781,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+
+    # Best-effort touch + telemetry for accepted callbacks
+    try:
+        from storage import touch_user
+        touch_user(uid)
+    except Exception:
+        pass
+    try:
+        import telemetry as _tel
+        _tel.record_command(uid)
+    except Exception:
+        pass
 
     # --- Main Menu ---
     if data == "cmd_menu":
@@ -1473,9 +1503,9 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"Validation failed: {msg}\nPlease try again.",
                     reply_markup=back_keyboard())
         except Exception as e:
-            log.error("Connect exchange failed for user %d: %s", uid, e)
+            log.error("Connect exchange failed uid=%s: %s", uid, e)
             await update.effective_chat.send_message(
-                f"Connection error: {e}", reply_markup=back_keyboard())
+                _safe_exchange_error(e), reply_markup=back_keyboard())
         finally:
             # Clear session data (secrets in memory)
             session.api_key = ''
@@ -1932,7 +1962,8 @@ async def setkeys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Your message with plaintext keys has been deleted.",
             reply_markup=back_keyboard())
     except Exception as e:
-        await update.effective_chat.send_message(f"Failed to set keys: {e}", reply_markup=back_keyboard())
+        log.warning("setkeys failed uid=%s: %s", uid, e)
+        await update.effective_chat.send_message(_safe_exchange_error(e), reply_markup=back_keyboard())
 
 
 async def myaccount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2035,13 +2066,21 @@ async def golive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def health_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show health telemetry counters."""
+    """Show health telemetry counters + multi-user telemetry."""
     uid = update.effective_user.id
     if not admin_only(uid):
         await update.message.reply_text("Not allowed.", reply_markup=back_keyboard())
         return
     from health_telemetry import format_health_stats
-    await update.message.reply_text(format_health_stats(), reply_markup=back_keyboard())
+    lines = [format_health_stats()]
+    # Light multi-user telemetry (in-memory; §18.17)
+    try:
+        import telemetry as _tel
+        lines.append("")
+        lines.append(_tel.render_summary())
+    except Exception:
+        pass
+    await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 
 async def visual_settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

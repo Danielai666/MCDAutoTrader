@@ -655,6 +655,20 @@ def upsert_user(uid: int, username: str, ts: int):
         )
 
 
+def touch_user(uid: int, ts: int = None) -> None:
+    """Update users.last_seen_ts to mark interaction. Safe on either backend;
+    silently no-ops if the row doesn't exist yet (so it's safe to call
+    before upsert_user). Used by the active-users cap and telemetry."""
+    try:
+        if ts is None:
+            import time as _t
+            ts = int(_t.time())
+        execute("UPDATE users SET last_seen_ts=? WHERE user_id=?", (ts, uid))
+    except Exception:
+        # Best-effort only — never fail a command because of a touch.
+        pass
+
+
 def upsert_trading_pair(pair: str, is_active: int, added_ts: int, notes: str = ''):
     """Upsert trading pair — works on both backends."""
     if _USE_POSTGRES:
