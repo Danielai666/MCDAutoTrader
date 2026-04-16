@@ -235,20 +235,48 @@ def build_panel_keyboard(uid: Optional[int] = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(_btn(uid, "btn_autotrade", "🤖 Auto"), callback_data="menu_autotrade"),
             InlineKeyboardButton(_btn(uid, "btn_mode", "⚙️ Mode"), callback_data="menu_mode"),
         ],
-        # Row 3 — Risk / AI & Analysis / Account & Portfolio
+        # Row 3 — Risk / Pairs / Account
         [
             InlineKeyboardButton(_btn(uid, "btn_risk", "🎯 Risk"), callback_data="menu_risk_v2"),
-            InlineKeyboardButton(_btn(uid, "btn_ai", "🧠 AI & Analysis"), callback_data="menu_ai"),
-            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account & Portfolio"), callback_data="menu_account"),
+            InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Pairs"), callback_data="menu_pairs"),
+            InlineKeyboardButton(_btn(uid, "btn_account", "👤 Account"), callback_data="menu_account"),
         ],
-        # Row 4 — Markets & Pairs / Trial / Settings & Strategy
+        # Row 4 — Price / Health / Advanced
+        # AI, Trial, and Settings tiles moved off main panel per user spec
+        # §18.22 — still reachable via /trial, /lang, /ai, /analyze_screens
+        # slash commands. Power-user actions grouped under Advanced.
         [
-            InlineKeyboardButton(_btn(uid, "btn_pairs", "🌐 Markets & Pairs"), callback_data="menu_pairs"),
-            InlineKeyboardButton(_btn(uid, "btn_trial", "🧪 Trial"), callback_data="menu_trial"),
-            InlineKeyboardButton(_btn(uid, "btn_settings", "⚙️ Settings & Strategy"), callback_data="menu_preferences"),
+            InlineKeyboardButton(_btn(uid, "btn_price", "💰 Price"), callback_data="cmd_price"),
+            InlineKeyboardButton(_btn(uid, "btn_health", "💚 Health"), callback_data="cmd_health"),
+            InlineKeyboardButton(_btn(uid, "btn_advanced", "🛠 Advanced"), callback_data="menu_advanced"),
         ],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def build_advanced_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """🛠 Advanced submenu — power-user actions moved off the main panel
+    per user spec §18.22. All callback_data values reuse existing handlers
+    (no new logic). Destructive actions (Sell Now) go through confirm_*
+    intermediate step; non-destructive ones fire directly."""
+    return InlineKeyboardMarkup([
+        # Row 1 — Position/guard actions
+        [InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="confirm_sellnow"),
+         InlineKeyboardButton(_btn(uid, "btn_sltp_trail", "📐 SL/TP/Trail"), callback_data="menu_guards_set"),
+         InlineKeyboardButton(_btn(uid, "btn_cancel", "❌ Cancel"), callback_data="menu_cancel")],
+        # Row 2 — Guards + risk board
+        [InlineKeyboardButton(_btn(uid, "btn_guards", "🛡 Guards"), callback_data="cmd_guards"),
+         InlineKeyboardButton(_btn(uid, "btn_check_guards", "🔍 Check"), callback_data="cmd_checkguards"),
+         InlineKeyboardButton(_btn(uid, "btn_risk_board", "⚠️ Risk Board"), callback_data="cmd_risk_board")],
+        # Row 3 — Analysis tools
+        [InlineKeyboardButton(_btn(uid, "btn_heatmap", "🔥 Heatmap"), callback_data="cmd_heatmap"),
+         InlineKeyboardButton(_btn(uid, "btn_insights", "🧠 Insights"), callback_data="cmd_ai"),
+         InlineKeyboardButton(_btn(uid, "btn_backtest", "📊 Backtest"), callback_data="cmd_backtest")],
+        # Row 4 — Visuals + admin
+        [InlineKeyboardButton(_btn(uid, "btn_visuals", "🎨 Visuals"), callback_data="cmd_visuals"),
+         InlineKeyboardButton(_btn(uid, "btn_admin", "🧩 Admin"), callback_data="menu_admin")],
+        _back_row(uid),
+    ])
 
 
 # ------------------------------------------------------------------
@@ -572,10 +600,10 @@ def build_panel_text(uid: int) -> str:
     # Telegram-render width. Kept short so the panel stays scannable.
     previews_title = _tr(uid, "previews_title", "Categories")
     previews = [
-        f"🎯 {_tr(uid, 'btn_risk_short', 'Risk')}  → {_tr(uid, 'preview_risk', 'Limits · SL/TP · Exposure')}",
-        f"🧠 {_tr(uid, 'btn_ai_short', 'AI & Analysis')}  → {_tr(uid, 'preview_ai', 'Signals · Insights · Charts')}",
-        f"🧪 {_tr(uid, 'btn_trial_short', 'Trial')}  → {_tr(uid, 'preview_trial', 'Start · Status · Report')}",
+        f"🎯 {_tr(uid, 'btn_risk_short', 'Risk')}  → {_tr(uid, 'preview_risk', 'Limits · Capital · Exposure')}",
         f"🌐 {_tr(uid, 'btn_markets_short', 'Markets')}  → {_tr(uid, 'preview_markets', 'Active · Add · Ranking')}",
+        f"👤 {_tr(uid, 'btn_account_short', 'Account')}  → {_tr(uid, 'preview_account', 'Connect · Portfolio · Language')}",
+        f"🛠 {_tr(uid, 'btn_advanced_short', 'Advanced')}  → {_tr(uid, 'preview_advanced', 'Guards · Charts · Admin')}",
     ]
     preview_block = f"\n\n_{previews_title}:_\n" + "\n".join(previews)
 

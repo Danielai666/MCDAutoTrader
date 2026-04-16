@@ -1373,6 +1373,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "⚙️ Preferences", reply_markup=_panel.build_preferences_menu(uid))
 
+    elif data == "menu_advanced":
+        import panel as _panel
+        await query.edit_message_text(
+            "🛠 Advanced", reply_markup=_panel.build_advanced_menu(uid))
+
     # Legacy menu_mode wrapper now includes trading actions (sell / panic / go_live)
     # so users don't need to hunt for them on the main grid.
     elif data == "menu_mode":

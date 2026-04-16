@@ -129,13 +129,13 @@ TEXT = {
         "btn_risk_board": "⚠️ Risk Board",
         "btn_heatmap": "🔥 Heatmap",
         "btn_panic": "🛑 Panic",
-        "btn_account": "👤 Account & Portfolio",
+        "btn_account": "👤 Account",
         "btn_admin": "🧩 Admin",
         "btn_price": "💰 Price",
         "btn_health": "💚 Health",
         "btn_go_live": "🚀 Go Live",
         "btn_visuals": "🎨 Visuals",
-        "btn_pairs": "🌐 Markets & Pairs",
+        "btn_pairs": "🌐 Pairs",
         "btn_check": "🔍 Check",
         "btn_sell_now": "🛑 Sell Now",
         "btn_sltp_trail": "📐 SL/TP/Trail",
@@ -186,6 +186,14 @@ TEXT = {
         "btn_quick_status": "⚡ Status",
         "btn_quick_signal": "⚡ Signal",
         "btn_quick_positions": "⚡ Positions",
+
+        # --- §18.22 Advanced submenu + label updates ---
+        "btn_advanced": "🛠 Advanced",
+        "btn_advanced_short": "Advanced",
+        "btn_account_short": "Account",
+        "btn_check_guards": "🔍 Check",
+        "preview_advanced": "Guards · Charts · Admin",
+        "preview_account": "Connect · Portfolio · Language",
 
         # --- Settings submenu ---
         "settings_title": "⚙️ Settings",
@@ -332,13 +340,13 @@ TEXT = {
         "btn_risk_board": "⚠️ برد ریسک",
         "btn_heatmap": "🔥 هیت‌مپ",
         "btn_panic": "🛑 توقف",
-        "btn_account": "👤 حساب و پورتفولیو",
+        "btn_account": "👤 حساب",
         "btn_admin": "🧩 ادمین",
         "btn_price": "💰 قیمت",
         "btn_health": "💚 سلامت",
         "btn_go_live": "🚀 واقعی",
         "btn_visuals": "🎨 نمودار",
-        "btn_pairs": "🌐 بازارها و جفت‌ها",
+        "btn_pairs": "🌐 جفت‌ها",
         "btn_check": "🔍 بررسی",
         "btn_sell_now": "🛑 فروش",
         "btn_sltp_trail": "📐 SL/TP/تریل",
@@ -389,6 +397,14 @@ TEXT = {
         "btn_quick_status": "⚡ وضعیت",
         "btn_quick_signal": "⚡ سیگنال",
         "btn_quick_positions": "⚡ پوزیشن",
+
+        # --- §18.22 Advanced submenu + label updates (Farsi) ---
+        "btn_advanced": "🛠 پیشرفته",
+        "btn_advanced_short": "پیشرفته",
+        "btn_account_short": "حساب",
+        "btn_check_guards": "🔍 بررسی",
+        "preview_advanced": "گاردها · چارت · ادمین",
+        "preview_account": "اتصال · پورتفولیو · زبان",
 
         # --- Settings submenu ---
         "settings_title": "⚙️ تنظیمات",
