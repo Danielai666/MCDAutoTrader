@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `bbf0a20` (Portfolio v3 — real wallet history, per-asset detail, allocation %, snapshot persistence)
+> Latest commit: `4bd333b` (Portfolio UX polish — visual dashboard layout, insight footer, refresh button)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1395,6 +1395,87 @@ Account submenu expanded with two new shortcut buttons:
 
 **Commit:** `bbf0a20`.
 
+### 18.27 Portfolio UX polish — visual dashboard, insight footer, refresh button
+
+User feedback after §18.26: "Current output is too raw." Spec called for a presentation-only upgrade. Scope-locked — zero changes to data model, snapshot logic, throttle, history calc, security, or ownership-model guards.
+
+**New `/portfolio` layout (visual hierarchy):**
+```
+💼 Portfolio Overview
+
+💰 Total value: $1,513.20
+💵 Cash: $1,273.86 (84.2%)
+📊 Invested: $239.34 (15.8%)
+
+📈 Unrealized PnL: -$11.32 (-0.74%)
+🔄 Last Sync: 2 min ago
+🔗 Exchange: Connected (KRAKEN)
+
+Assets Breakdown
+🟢 USD  — $1,273.86 (84.2%)
+🟡 BNB  — $239.25 (15.8%)
+🔵 SOL  — $0.05
+🟣 ETH  — $0.01
+
+Open Positions
+🤖 BNB/USD BUY 0.385 @ $650 → $621.43  -$11.00 (-1.79%)
+
+🧠 Portfolio Insight
+• Conservative (mostly cash)
+• Low exposure to volatility
+```
+
+**New presentation helpers in `portfolio.py`:**
+- `_relative_time(ts, uid)` — "2 min ago" / "3 hr ago" / "1 days ago"
+- `_portfolio_insight(uid, snap)` — bias heuristic:
+  - ≥70% cash → Conservative
+  - 40–70% cash → Balanced
+  - <40% cash → Aggressive
+- Colored-dot markers (🟢🟡🔵🟣🟠⚪🔴) cycled by index for Assets Breakdown
+- Sub-1% holdings get compact line (no % noise on dust)
+
+**New keyboard (`panel.py`):**
+`build_portfolio_keyboard(uid)` attached to `/portfolio` and 💼 Portfolio button outputs:
+```
+🔄 Refresh   📉 Report   📈 History
+⬅️ Back       🏠 Main Menu
+```
+
+**New callback:** `cmd_portfolio_refresh` (tuple-dispatched alongside `cmd_portfolio`) — same force=True fetch semantics so users hit Refresh after exchange changes without re-typing.
+
+**Panel summary upgraded to 3 lines (spec §3):**
+```
+Portfolio: $1,513.20   Cash: $1,273.86
+PnL: +0.00% (1d)   Unrealized: -$11.32
+Exposure: 16%
+```
+Still cache-only — never triggers a live fetch from the panel itself.
+
+**Restyled edge cases:**
+- `NO_EXCHANGE` now leads with 🔌 glyph + clean hint text
+- `ERROR` leads with ⚠️ glyph + italicized reason
+
+**i18n:** 17 new keys per locale (title, 6 insight strings, 4 relative-time labels, cash/exposure short labels, refresh button, last sync, invested). No hardcoded English anywhere.
+
+**Verification (runtime simulation, 7/7 paths pass):**
+- `ast` + `py_compile` on `portfolio.py`, `i18n.py`, `telegram_bot.py`, `panel.py`
+- OK path renders new layout with all sections + Insight
+- NO_EXCHANGE / ERROR render clean-styled messages
+- Insight boundaries verified: Conservative (≥70% cash), Balanced, Aggressive
+- Panel summary renders 3 lines correctly
+- Keyboard builder: 2 rows, 5 buttons, all callbacks dispatch
+
+**Preserved (strict non-destruction):**
+- Zero changes to `fetch_portfolio`, `save_snapshot`, throttle, history
+- Zero changes to ownership-model guards (§18.25) — still read-only, no CCXT write calls
+- Zero changes to multi-user isolation (all queries user_id-scoped)
+- All existing callbacks untouched; 1 new added (tuple-dispatched)
+- `/portfolio`, `/portfolio report`, `/portfolio history`, `/portfolio asset` — data behavior unchanged
+
+**Files touched:** `portfolio.py`, `i18n.py`, `telegram_bot.py`, `panel.py` (4 files; 169 insertions, 43 deletions)
+
+**Commit:** `4bd333b`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1407,7 +1488,7 @@ Account submenu expanded with two new shortcut buttons:
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `bbf0a20` (Portfolio v3 — wallet history, per-asset detail, allocation %, snapshot persistence) |
+| Latest commit | `4bd333b` (Portfolio UX polish — visual dashboard, insight footer, refresh button) |
 | `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
