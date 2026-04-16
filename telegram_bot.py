@@ -1090,7 +1090,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
                                      caption="Watchlist Heatmap", reply_markup=back_keyboard())
         except Exception as e:
-            await app.bot.send_message(chat_id=chat_id, text=f"Heatmap error: {e}", reply_markup=back_keyboard())
+            await app.bot.send_message(chat_id=chat_id, text="Heatmap render failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_positions_card":
         try:
@@ -1113,7 +1113,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
                                      caption=summary, reply_markup=back_keyboard())
         except Exception as e:
-            await app.bot.send_message(chat_id=chat_id, text=f"Positions error: {e}", reply_markup=back_keyboard())
+            await app.bot.send_message(chat_id=chat_id, text="Positions render failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_risk_board":
         try:
@@ -1140,7 +1140,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
                                      caption=summary, reply_markup=back_keyboard())
         except Exception as e:
-            await app.bot.send_message(chat_id=chat_id, text=f"Risk board error: {e}", reply_markup=back_keyboard())
+            await app.bot.send_message(chat_id=chat_id, text="Risk board render failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_ai_card":
         try:
@@ -1159,7 +1159,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await app.bot.send_photo(chat_id=chat_id, photo=_io.BytesIO(png),
                                      caption=f"Last {len(decisions)} AI decisions", reply_markup=back_keyboard())
         except Exception as e:
-            await app.bot.send_message(chat_id=chat_id, text=f"AI card error: {e}", reply_markup=back_keyboard())
+            await app.bot.send_message(chat_id=chat_id, text="AI card render failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_myaccount":
         try:
@@ -1180,7 +1180,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             await app.bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=back_keyboard())
         except Exception as e:
-            await app.bot.send_message(chat_id=chat_id, text=f"Account error: {e}", reply_markup=back_keyboard())
+            await app.bot.send_message(chat_id=chat_id, text="Account load failed. Try again.", reply_markup=back_keyboard())
 
     elif data == "cmd_health_stats":
         if admin_only(uid):
@@ -1270,7 +1270,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await app.bot.send_message(chat_id=chat_id, text="Cannot execute: missing price/ATR data.", reply_markup=back_keyboard())
             except Exception as e:
-                await app.bot.send_message(chat_id=chat_id, text=f"Error: {e}", reply_markup=back_keyboard())
+                await app.bot.send_message(chat_id=chat_id, text="Trade execution error. Try again.", reply_markup=back_keyboard())
 
     elif data == "confirm_skip":
         await query.edit_message_text("Trade skipped.", reply_markup=back_keyboard())
@@ -1402,6 +1402,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # Best-effort touch for text-input interactions (guard flows, connect flow,
+    # ReplyKeyboard shortcuts). Keeps active-user tracking complete.
+    try:
+        from storage import touch_user
+        touch_user(uid)
+    except Exception:
+        pass
 
     # --- Persistent bottom ReplyKeyboard shortcuts (EN + FA) ---
     # These taps arrive as plain text messages. Route them before checking
@@ -2139,7 +2147,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(summary, reply_markup=back_keyboard())
     except Exception as e:
         log.error("Backtest failed: %s", e)
-        await msg.edit_text(f"Backtest failed: {e}", reply_markup=back_keyboard())
+        await msg.edit_text("Backtest failed. Check pair and try again.", reply_markup=back_keyboard())
 
 
 async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2200,6 +2208,12 @@ async def analyze_screens_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def screenshot_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming photos during an active screenshot session."""
     uid = update.effective_user.id
+    # Best-effort touch for photo uploads
+    try:
+        from storage import touch_user
+        touch_user(uid)
+    except Exception:
+        pass
     from screenshot_analyzer import get_session, add_image
     session = get_session(uid)
     if not session:
@@ -2264,7 +2278,7 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.effective_chat.send_message(part)
     except Exception as e:
         log.error("Screenshot analysis failed: %s", e)
-        await msg.edit_text(f"Analysis failed: {e}", reply_markup=back_keyboard())
+        await msg.edit_text("Analysis failed. Try again with fewer images.", reply_markup=back_keyboard())
     finally:
         end_session(uid)
         # After the (possibly multi-chunk) analysis output, surface the
@@ -2689,32 +2703,32 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("checkguards", rate_limited(checkguards)))
     app.add_handler(CommandHandler("price", rate_limited(price)))
 
-    # --- New Phase 5-7 commands ---
-    app.add_handler(CommandHandler("positions", positions_cmd))
-    app.add_handler(CommandHandler("trades", trades_cmd))
-    app.add_handler(CommandHandler("pnl", pnl_cmd))
-    app.add_handler(CommandHandler("report", report_cmd))
-    app.add_handler(CommandHandler("pairs", pairs_cmd))
-    app.add_handler(CommandHandler("addpair", addpair_cmd))
-    app.add_handler(CommandHandler("rmpair", rmpair_cmd))
-    app.add_handler(CommandHandler("ranking", ranking_cmd))
-    app.add_handler(CommandHandler("health", health_cmd))
-    app.add_handler(CommandHandler("ai", ai_cmd))
-    app.add_handler(CommandHandler("killswitch", killswitch_cmd))
-    app.add_handler(CommandHandler("blocked", blocked_cmd))
-    app.add_handler(CommandHandler("capital", capital_cmd))
-    app.add_handler(CommandHandler("maxexposure", maxexposure_cmd))
-    app.add_handler(CommandHandler("divzones", divzones_cmd))
-    app.add_handler(CommandHandler("divradar", divradar_cmd))
+    # --- Phase 5-7 commands (all rate-limited for consistency) ---
+    app.add_handler(CommandHandler("positions", rate_limited(positions_cmd)))
+    app.add_handler(CommandHandler("trades", rate_limited(trades_cmd)))
+    app.add_handler(CommandHandler("pnl", rate_limited(pnl_cmd)))
+    app.add_handler(CommandHandler("report", rate_limited(report_cmd)))
+    app.add_handler(CommandHandler("pairs", rate_limited(pairs_cmd)))
+    app.add_handler(CommandHandler("addpair", rate_limited(addpair_cmd)))
+    app.add_handler(CommandHandler("rmpair", rate_limited(rmpair_cmd)))
+    app.add_handler(CommandHandler("ranking", rate_limited(ranking_cmd)))
+    app.add_handler(CommandHandler("health", rate_limited(health_cmd)))
+    app.add_handler(CommandHandler("ai", rate_limited(ai_cmd)))
+    app.add_handler(CommandHandler("killswitch", rate_limited(killswitch_cmd)))
+    app.add_handler(CommandHandler("blocked", rate_limited(blocked_cmd)))
+    app.add_handler(CommandHandler("capital", rate_limited(capital_cmd)))
+    app.add_handler(CommandHandler("maxexposure", rate_limited(maxexposure_cmd)))
+    app.add_handler(CommandHandler("divzones", rate_limited(divzones_cmd)))
+    app.add_handler(CommandHandler("divradar", rate_limited(divradar_cmd)))
 
-    # --- Production hardening commands ---
-    app.add_handler(CommandHandler("reconcile", reconcile_cmd))
-    app.add_handler(CommandHandler("liveready", liveready_cmd))
+    # --- Production hardening commands (rate-limited) ---
+    app.add_handler(CommandHandler("reconcile", rate_limited(reconcile_cmd)))
+    app.add_handler(CommandHandler("liveready", rate_limited(liveready_cmd)))
 
-    # --- Multi-user commands ---
-    app.add_handler(CommandHandler("setkeys", setkeys_cmd))
-    app.add_handler(CommandHandler("myaccount", myaccount_cmd))
-    app.add_handler(CommandHandler("panic_stop", panic_stop_cmd))
+    # --- Multi-user commands (rate-limited) ---
+    app.add_handler(CommandHandler("setkeys", rate_limited(setkeys_cmd)))
+    app.add_handler(CommandHandler("myaccount", rate_limited(myaccount_cmd)))
+    app.add_handler(CommandHandler("panic_stop", rate_limited(panic_stop_cmd)))
     app.add_handler(CommandHandler("backtest", rate_limited(backtest_cmd)))
     app.add_handler(CommandHandler("health_stats", rate_limited(health_stats_cmd)))
     app.add_handler(CommandHandler("golive", rate_limited(golive_cmd)))
