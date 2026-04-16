@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `1c21fd7` (Stabilization — close 8 exception leaks, wrap all 49 handlers, touch all entry points)
+> Latest commit: `92caad2` (UI — multi-level menu refactor: 12-tile L1 + 7 L2 submenus + confirm flows)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -988,6 +988,67 @@ On Railway → set `FEATURE_TRIAL_MODE=true` → Deploy. Then:
 - `/trial start 1000` — begin 14-day paper run with $1000 virtual capital
 - `/trial status | report | summary | stop | go_live confirm`
 
+### 18.20 Menu refactor — hierarchical 12-tile L1 + 7 L2 submenus
+
+User requested a refactor into a clean multi-level navigation system. Previous panel was a flat 10-row / 28-button grid — easy to build but overwhelming.
+
+**Restore anchor:** tag `v1.3-pre-menu-refactor` + branch `backup/pre-menu-refactor` at commit `be4e716` captured BEFORE these changes.
+
+**Honest flag:** user's spec listed 12 L1 buttons AND "max 6-8 per screen" — those contradicted. Went with the explicit 12-button list in a 4×3 grid (still far leaner than 28). The Conservative/Balanced/Aggressive/Notifications/Voice preferences show "coming soon" because concrete behaviour requires user design decisions on preset values (which `risk_per_trade` / `max_exposure` / alert thresholds each profile should set) — that's a design call, not an implementation call.
+
+**Level 1 — main panel (4×3 = 12 tiles):**
+
+| Row | Tiles |
+|---|---|
+| 1 | 📊 Status · 📈 Signal · 💼 Positions (quick read-only) |
+| 2 | 📉 Report · 🤖 AutoTrade · ⚙️ Mode (trading submenus) |
+| 3 | 🎯 Risk · 🧠 AI · 👤 Account (category submenus) |
+| 4 | 🌐 Pairs · 🧪 Trial · ⚙️ Settings (category submenus) |
+
+**Level 2 — seven new submenus:**
+
+- **🎯 Risk** (`menu_risk_v2`): Daily Limit (preset picker) · Capital (prompt) · Max Exposure (prompt) · SL/TP/Trail · Risk Board · ⬅️ Back
+- **🧠 AI** (`menu_ai`): AI Card · Insights · Analyze · Visuals · Backtest · Heatmap · ⬅️ Back
+- **🧪 Trial** (`menu_trial`): Start (prompt) · Status · Report · Summary · Stop · ⬅️ Back
+- **👤 Account** (`menu_account`): Connect · Disconnect (confirm) · My Account · Portfolio · Language · ⬅️ Back
+- **⚙️ Mode** (`menu_mode`, repurposed): Paper · Live · Go Live Wizard · Sell Now (confirm) · Panic Stop (confirm) · ⬅️ Back
+- **⚙️ Preferences** (`menu_preferences`): Conservative · Balanced · Aggressive · Notifications · Voice · ⬅️ Back (all show "coming soon")
+- **🌐 Language** (`menu_language`; legacy `menu_settings` aliased): English · فارسی · ⬅️ Back
+
+**Level 3 — text-input prompt flows (new):**
+- `prompt_capital` → "Enter capital amount (USD):" → `UPDATE users.capital_usd`
+- `prompt_maxexposure` → "Enter max exposure (0.0–1.0):" → `UPDATE users.max_portfolio_exposure`
+- `prompt_trial_start` → "Enter trial capital (USD):" → `trial.start_trial(uid, val, 14)`
+
+All three use the existing `PENDING_INPUT` dict + `text_input_handler` machinery. Existing prompt types (`sl`, `tp`, `trail`, `addpair`, `rmpair`, `connect_key`, `connect_secret`) preserved.
+
+**Sensitive-action confirmations (new `confirm_*` callbacks):**
+- `confirm_sellnow` → Yes/Cancel → runs `cmd_sellnow` (per-user close, already user-scoped)
+- `confirm_panic` → Yes/Cancel → runs `cmd_panic_stop`
+- `confirm_disconnect` → Yes/Cancel → runs `cmd_disconnect`
+- Live mode already gated by `LIVE_TRADE_ALLOWED_IDS` → no extra confirm needed
+- Connect already has its own multi-step state machine → no extra confirm needed
+
+**Trial submenu callbacks (new, pure UI plumbing):**
+- `cmd_trial_status` / `cmd_trial_report` / `cmd_trial_summary` / `cmd_trial_stop` — wire the Trial submenu buttons to the existing `trial.render_*` and `stop_trial` functions. All respect the `FEATURE_TRIAL_MODE` flag and show "disabled" message when off.
+
+**i18n:** 26 new keys in both EN and FA (new button labels, prompt texts, confirmation messages, "coming soon" text). Total trial/menu i18n keys now cover every new surface.
+
+**Backward compatibility (explicit):**
+- All existing `callback_data` strings preserved; no handler removed.
+- `build_settings_keyboard()` kept as alias for new `build_language_menu()` so any external caller still renders.
+- All typed slash commands (`/trial`, `/portfolio`, `/risk`, `/capital`, `/maxexposure`, etc.) continue to work — menu is purely additive navigation on top.
+- All safety-layer guarantees (rate limit, touch_user, telemetry, safe error wrapping) automatically cover new menu interactions because they run through the same `button_callback` entry point.
+
+**Verification:**
+- `ast` + `py_compile` on `panel.py`, `i18n.py`, `telegram_bot.py`
+- 12/12 main callback_data values resolve to dispatch cases
+- 7 submenu builders render with expected rows/buttons
+- 26/26 i18n keys present in both `en` and `fa`
+- Tuple-dispatched callbacks (`menu_language`, `pref_*`) confirmed reachable
+
+**Commit:** `92caad2`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -1000,8 +1061,8 @@ On Railway → set `FEATURE_TRIAL_MODE=true` → Deploy. Then:
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `1c21fd7` (stabilization — 8 exception leaks closed, 49/49 handlers wrapped, all entry points touched) |
-| `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu + exchange-connection indicator |
+| Latest commit | `92caad2` (menu refactor — 12-tile L1 + 7 L2 submenus + confirm flows for sensitive actions) |
+| `FEATURE_CONTROL_PANEL` | `true` — 12-tile L1 main panel + 7 L2 submenus (Risk/AI/Trial/Account/Mode/Preferences/Language) + L3 text-input prompts + confirmation flows for Sell/Panic/Disconnect + dynamic header + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
 | `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
@@ -1012,7 +1073,7 @@ On Railway → set `FEATURE_TRIAL_MODE=true` → Deploy. Then:
 | `FEATURE_MT5_BRIDGE` | `false` |
 | Multi-user state | Personal commands ungated; 2 tenant-leak bugs fixed; admin gate retained on killswitch/reconcile/health_stats only |
 | Safety layer | Dual-window rate limit (5/10s burst + 10/60s volume); active-user cap (24h + autotrade); exchange-error wrapper on ALL user paths; light telemetry (users, cpm) in `/health_stats` |
-| Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser` + branches `backup/pre-ui-panel`, `backup/pre-multiuser` (all on GitHub) |
+| Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser`, `v1.3-pre-menu-refactor` + branches `backup/pre-ui-panel`, `backup/pre-multiuser`, `backup/pre-menu-refactor` (all on GitHub) |
 | Open deferrals | Exit optimization (ATR-unit reconciliation); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; persistent rate-limit (Redis/DB) if needed at scale |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
 | Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
