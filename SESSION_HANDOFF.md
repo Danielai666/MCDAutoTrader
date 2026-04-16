@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `40dd091` (Safety layer — dual-window rate limit + MAX_ACTIVE_USERS + clean exchange errors)
+> Latest commit: `ab5532b` (Safety layer v2 — active-user cap, global error wrapper, telemetry, UX)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -890,6 +890,39 @@ User specced a production-grade safety layer. Second honest audit — most of it
 
 **Commit:** `40dd091`.
 
+### 18.17 Safety layer v2 — active-user cap, global error wrapper, telemetry, UX refinement
+
+User asked to "upgrade safety layer to production-grade completeness." Most of the prior safety work (§18.16) was already solid — this commit refines 4 areas and adds 1 new module.
+
+**1. Active-user cap replaces total-user count:**
+Previous: `_is_over_user_cap` counted total rows in `users` — dormant accounts from 6 months ago consumed capacity for no reason.
+Now: `telemetry.active_users()` counts users with `last_seen_ts >= now - 24h` OR `autotrade_enabled=1`. New `storage.touch_user(uid)` updates `users.last_seen_ts` on every accepted command (called in the `rate_limited` decorator and `button_callback`). Best-effort; no-ops silently on missing rows.
+
+**2. Global exchange-error wrapper applied to all user-facing exchange paths:**
+`_safe_exchange_error(e)` now wired into:
+- `/price` (was leaking raw `ccxt.NetworkError` text to the user)
+- `/setkeys` (was leaking `"Failed to set keys: <raw>"`)
+- `/connect` exchange validation (was leaking `"Connection error: <raw>"`)
+- `/portfolio` and `/portfolio report real` (already wrapped since §18.16)
+Exception-type check order verified: specific subclasses (`RateLimitExceeded`, `AuthenticationError`) before parents (`NetworkError`). Full exception still logged with `uid=` for operator debugging.
+
+**3. Light telemetry (new `telemetry.py`, ~80 LOC):**
+In-memory, no external dependencies:
+- `record_command(uid)` — ring buffer of timestamps, trimmed to 5 min
+- `commands_per_minute()` — count in last 60s
+- `total_users()` — `COUNT(*) FROM users`
+- `active_users(window_seconds)` — count with `last_seen_ts` + `autotrade` filter (same query as the cap logic, DRY)
+- `render_summary()` — plaintext block appended to `/health_stats` output (admin-only)
+Counters increment on every accepted command (rate_limited) and callback (button_callback). Resets on restart (in-memory only; acceptable for operational visibility, not historical trend analysis).
+
+**4. UX message refinement:**
+`"Too many requests, slow down"` → `"⚠️ Too many requests. Please wait a few seconds."` — applied in both the `rate_limited` decorator and the `button_callback` rate-limit check.
+
+**Deferred: persistent rate limit.**
+User marked optional; "system still works without persistence." In-memory rate limit resets on Railway restart. Redis/DB fallback not added (new dependency, YAGNI at this bot's scale). Noted as a follow-up if the bot scales to 100+ concurrent users where Railway restarts become a meaningful exploit vector.
+
+**Commit:** `ab5532b`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-15 — end of Session 2)
@@ -902,7 +935,7 @@ User specced a production-grade safety layer. Second honest audit — most of it
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `40dd091` (safety layer — dual-window rate limit + MAX_ACTIVE_USERS + clean exchange errors) |
+| Latest commit | `ab5532b` (safety layer v2 — active-user cap, global error wrapper, telemetry, UX) |
 | `FEATURE_CONTROL_PANEL` | `true` — modern inline panel + live dashboard + Settings submenu + exchange-connection indicator |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
 | `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
@@ -913,9 +946,9 @@ User specced a production-grade safety layer. Second honest audit — most of it
 | `FEATURE_ICHIMOKU` | `true` |
 | `FEATURE_MT5_BRIDGE` | `false` |
 | Multi-user state | Personal commands ungated; 2 tenant-leak bugs fixed; admin gate retained on killswitch/reconcile/health_stats only |
-| Safety layer | Dual-window rate limit (5/10s burst + 10/60s volume); `MAX_ACTIVE_USERS=20` soft cap; clean exchange-error wrapper on portfolio paths |
+| Safety layer | Dual-window rate limit (5/10s burst + 10/60s volume); active-user cap (24h + autotrade); exchange-error wrapper on ALL user paths; light telemetry (users, cpm) in `/health_stats` |
 | Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser` + branches `backup/pre-ui-panel`, `backup/pre-multiuser` (all on GitHub) |
-| Open deferrals | Exit optimization (ATR-unit reconciliation); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; exchange-error wrapper on non-portfolio paths |
+| Open deferrals | Exit optimization (ATR-unit reconciliation); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; persistent rate-limit (Redis/DB) if needed at scale |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
 | Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
 
@@ -937,5 +970,5 @@ User specced a production-grade safety layer. Second honest audit — most of it
 10. **Three dormant features, one active tuning observation:** all recent feature work (Trial, i18n, Portfolio) is deployed but flagged off at user's request. Flip any single flag to `true` on Railway to activate without code changes.
 11. **Multi-user live (§18.15):** personal commands are now open to all users (`/autotrade`, `/mode`, `/sellnow`, `/capital`, `/maxexposure`, `/liveready`). Two pre-existing tenant-leak bugs in the trading path were fixed. LIVE mode still requires the user's Telegram ID to be in `LIVE_TRADE_ALLOWED_IDS`.
 12. **Production safety (§18.16):** dual-window rate limit (5/10s burst + 10/60s volume), `MAX_ACTIVE_USERS=20` soft cap (new users over cap forced to paper), clean exchange-error wrapper on portfolio paths. All tunable via Railway env.
-13. **Future safety extensions when ready:** extend `_safe_exchange_error` to `/connect`, `/myaccount`, and other exchange-touching command paths (currently only wired into `/portfolio`). Wire `logging_utils.py` into high-traffic log sites for uniform JSON output with correlation IDs. Both are single-session work items — flag when desired.
+13. **Safety layer complete (§18.17):** `_safe_exchange_error` now covers ALL user-facing exchange paths (price, setkeys, connect, portfolio). Active-user cap uses 24h-interaction + autotrade definition. Light telemetry (total/active users, commands/min) exposed in `/health_stats`. Remaining deferral: persistent rate-limit (Redis/DB) if scaling past ~50 concurrent users; full `logging_utils.py` structured-logging rollout across all modules.
 
