@@ -51,6 +51,54 @@ def _is_autotrade_enabled() -> bool:
     return len(_get_autotrade_user_ids()) > 0
 
 
+def _record_user_signal(uid: int, user_results: list) -> None:
+    """
+    Populate the control-panel header's `Last Signal` line.
+
+    Picks the most salient result for this user's watchlist:
+      1. Highest-conviction ENTER/EXIT (conf × |merged_score|)
+      2. Otherwise, strongest non-HOLD merged signal by |merged_score|
+    Best-effort: never raises, never blocks the cycle.
+    """
+    try:
+        import panel as _panel
+    except Exception:
+        return
+    if not user_results:
+        return
+    try:
+        actionable = [r for r in user_results
+                      if r.get('decision', {}).get('decision') in ('ENTER', 'EXIT')]
+        if actionable:
+            actionable.sort(
+                key=lambda r: r['decision'].get('confidence', 0) * abs(
+                    r.get('features', {}).get('merged', {}).get('merged_score', 0)),
+                reverse=True,
+            )
+            best = actionable[0]
+            dec = best['decision']
+            if dec.get('decision') == 'EXIT':
+                direction = 'EXIT'
+            else:
+                direction = dec.get('side', 'BUY')
+            score = best.get('features', {}).get('merged', {}).get('merged_score', 0)
+            conf = dec.get('confidence', 0)
+        else:
+            ranked = sorted(
+                user_results,
+                key=lambda r: abs(r.get('features', {}).get('merged', {}).get('merged_score', 0)),
+                reverse=True,
+            )
+            best = ranked[0]
+            merged = best.get('features', {}).get('merged', {})
+            direction = merged.get('merged_direction', 'HOLD')
+            score = merged.get('merged_score', 0)
+            conf = best.get('decision', {}).get('confidence', 0)
+        _panel.track_last_signal(uid, direction, float(score or 0.0), float(conf or 0.0))
+    except Exception:
+        pass
+
+
 async def _compute_signals(pair: str = None) -> Dict:
     pair = pair or SETTINGS.PAIR
     sigs = {}
@@ -123,6 +171,10 @@ async def _execute_autonomous_cycle_for_user(app: Application, ctx, pair_results
     action_log = []
     uid = ctx.user_id
     cycle_ts = int(time.time())
+
+    # Control-panel header hook — runs before mode gates so every user
+    # whose cycle fires gets `Last Signal` populated, regardless of ai_mode.
+    _record_user_signal(uid, pair_results)
 
     # Mode gating
     if getattr(ctx, 'panic_stopped', False):
@@ -367,6 +419,14 @@ async def run_cycle_once(app: Application, notify: bool = True,
         non_auto_users = fetchall("SELECT user_id FROM users WHERE autotrade_enabled=0 OR autotrade_enabled IS NULL")
         for (uid,) in (non_auto_users or []):
             if uid not in autotrade_uids:
+                # Populate this user's panel Last Signal from their watchlist slice.
+                try:
+                    user_pairs = get_active_pairs(uid)
+                    user_results = [market_data[p] for p in user_pairs if p in market_data]
+                    if user_results:
+                        _record_user_signal(uid, user_results)
+                except Exception:
+                    pass
                 try:
                     await app.bot.send_message(chat_id=uid, text=f"{signal_summary}\nAutoTrade: OFF")
                 except Exception:
