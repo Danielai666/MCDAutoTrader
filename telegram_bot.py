@@ -271,29 +271,13 @@ def admin_keyboard():
         [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
     ])
 
-def autotrade_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ AutoTrade ON", callback_data="cmd_autotrade_on"),
-         InlineKeyboardButton("⛔ AutoTrade OFF", callback_data="cmd_autotrade_off")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
-    ])
-
-def mode_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Paper Mode", callback_data="cmd_mode_paper"),
-         InlineKeyboardButton("🔴 Live Mode", callback_data="cmd_mode_live")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
-    ])
-
-def risk_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("$25", callback_data="cmd_risk_25"),
-         InlineKeyboardButton("$50", callback_data="cmd_risk_50"),
-         InlineKeyboardButton("$100", callback_data="cmd_risk_100")],
-        [InlineKeyboardButton("$200", callback_data="cmd_risk_200"),
-         InlineKeyboardButton("$500", callback_data="cmd_risk_500")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="cmd_menu")],
-    ])
+# autotrade_keyboard / mode_keyboard / risk_keyboard — REMOVED.
+# Replaced by state-aware panel builders:
+#   panel.build_autotrade_menu(uid)      — for AutoTrade
+#   panel.build_mode_menu(uid)           — for Trading Mode
+#   panel.build_risk_presets_menu(uid)   — for Daily Loss presets (marks ✓)
+# The old versions had static ON/OFF / Paper/Live labels that violated the
+# UX state-visibility standard (no "Current:" block, no action verbs).
 
 def guards_set_keyboard():
     return InlineKeyboardMarkup([
@@ -841,40 +825,70 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await run_cycle_once(app)
         await app.bot.send_message(chat_id=chat_id, text=res, reply_markup=back_keyboard())
 
-    # --- AutoTrade submenu ---
+    # --- AutoTrade submenu (state-visibility standard) ---
     elif data == "menu_autotrade":
-        await query.edit_message_text("🤖 AutoTrade", reply_markup=autotrade_keyboard())
+        from ui_state import get_control_state, render_setting_menu
+        from i18n import t as _t
+        import panel as _panel
+        st = get_control_state(uid, "autotrade")
+        title = _t(uid, "ctrl_autotrade") or "AutoTrade"
+        await query.edit_message_text(
+            render_setting_menu(title, st, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=_panel.build_autotrade_menu(uid))
 
     elif data == "cmd_autotrade_on":
-        # Per-user flag — any user may toggle their own autotrade
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "autotrade")
         execute("UPDATE users SET autotrade_enabled=1 WHERE user_id=?", (uid,))
-        await query.edit_message_text("✅ AutoTrade enabled.", reply_markup=back_keyboard())
+        new = get_control_state(uid, "autotrade")
+        title = _t(uid, "ctrl_autotrade") or "AutoTrade"
+        await query.edit_message_text(
+            render_change_confirmation(title, prev, new, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
 
     elif data == "cmd_autotrade_off":
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "autotrade")
         execute("UPDATE users SET autotrade_enabled=0 WHERE user_id=?", (uid,))
-        await query.edit_message_text("⛔ AutoTrade disabled.", reply_markup=back_keyboard())
+        new = get_control_state(uid, "autotrade")
+        title = _t(uid, "ctrl_autotrade") or "AutoTrade"
+        await query.edit_message_text(
+            render_change_confirmation(title, prev, new, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
 
-    # --- Mode submenu ---
-    elif data == "menu_mode":
-        await query.edit_message_text("📋 Trading Mode", reply_markup=mode_keyboard())
-
+    # --- Mode submenu (state-visibility standard) ---
     elif data == "cmd_mode_paper":
-        # Per-user flag — any user may switch their own account to PAPER
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "mode")
         execute("UPDATE users SET trade_mode='PAPER' WHERE user_id=?", (uid,))
-        await query.edit_message_text("📝 Mode set to PAPER.", reply_markup=back_keyboard())
+        new = get_control_state(uid, "mode")
+        title = _t(uid, "ctrl_mode") or "Trading Mode"
+        await query.edit_message_text(
+            render_change_confirmation(title, prev, new, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
 
     elif data == "cmd_mode_live":
         # Live mode requires TWO independent gates (§18.25):
         #   1. LIVE_TRADE_ALLOWED_IDS (operator approval)
-        #   2. Per-user exchange credentials must exist (user owns their trading)
-        # Without #2 we would either fail at CCXT level or (worse) risk
-        # mis-configuration fallbacks. Block early with a clear message.
+        #   2. Per-user exchange credentials must exist
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "mode")
         if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
             await query.edit_message_text(
-                "⛔ Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.",
+                f"⛔ *Live mode requires approval*\n"
+                f"Current: *{prev['label']}* {prev['glyph']}\n"
+                "_Ask an admin to add your ID to LIVE\\_TRADE\\_ALLOWED\\_IDS._",
+                parse_mode="Markdown",
                 reply_markup=back_keyboard())
         else:
-            # Per-user credential gate
             try:
                 from storage import get_credential as _gc
                 cred = _gc(uid, "ccxt")
@@ -882,21 +896,105 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cred = None
             if not cred:
                 await query.edit_message_text(
-                    "⛔ Live trading requires your own exchange connection.\n"
-                    "Tap 👤 Account → 🔌 Connect to link your exchange keys first.",
+                    f"⛔ *Live trading requires your own exchange connection*\n"
+                    f"Current: *{prev['label']}* {prev['glyph']}\n"
+                    "_Tap 👤 Account → 🔌 Connect to link your exchange keys first._",
+                    parse_mode="Markdown",
                     reply_markup=back_keyboard())
             else:
                 execute("UPDATE users SET trade_mode='LIVE' WHERE user_id=?", (uid,))
-                await query.edit_message_text("🔴 Mode set to LIVE.", reply_markup=back_keyboard())
+                new = get_control_state(uid, "mode")
+                title = _t(uid, "ctrl_mode") or "Trading Mode"
+                await query.edit_message_text(
+                    render_change_confirmation(title, prev, new, uid=uid),
+                    parse_mode="Markdown",
+                    reply_markup=back_keyboard())
 
-    # --- Risk submenu ---
+    elif data == "cmd_panic_release":
+        # Release panic_stop (user_settings.panic_stop=0). Does NOT
+        # re-enable autotrade automatically — that is intentionally a
+        # second deliberate action by the user.
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "panic")
+        try:
+            from storage import upsert_user_settings
+            upsert_user_settings(uid, panic_stop=0)
+        except Exception:
+            pass
+        new = get_control_state(uid, "panic")
+        title = _t(uid, "ctrl_panic") or "Panic Stop"
+        effect = "panic brake released; autotrade stays OFF — re-enable it explicitly if you want to resume"
+        await query.edit_message_text(
+            render_change_confirmation(title, prev, new, uid=uid,
+                                       effect_override=effect),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
+
+    elif data == "cmd_killswitch_on" or data == "cmd_killswitch_off":
+        # Admin-only global toggle
+        if not admin_only(uid):
+            from i18n import t as _t
+            await query.edit_message_text(
+                _t(uid, "ui_admin_only") or "Admin only.",
+                reply_markup=back_keyboard())
+        else:
+            import config as _cfg
+            from ui_state import get_control_state, render_change_confirmation
+            from i18n import t as _t
+            prev = get_control_state(uid, "killswitch")
+            _cfg.SETTINGS.KILL_SWITCH = (data == "cmd_killswitch_on")
+            new = get_control_state(uid, "killswitch")
+            title = _t(uid, "ctrl_killswitch") or "Kill Switch"
+            await query.edit_message_text(
+                render_change_confirmation(title, prev, new, uid=uid),
+                parse_mode="Markdown",
+                reply_markup=back_keyboard())
+
+    elif data == "cmd_aggressive_on" or data == "cmd_aggressive_off":
+        # Admin-only global toggle (runtime flip of SETTINGS.AGGRESSIVE_TEST_MODE)
+        if not admin_only(uid):
+            from i18n import t as _t
+            await query.edit_message_text(
+                _t(uid, "ui_admin_only") or "Admin only.",
+                reply_markup=back_keyboard())
+        else:
+            import config as _cfg
+            from ui_state import get_control_state, render_change_confirmation
+            from i18n import t as _t
+            prev = get_control_state(uid, "aggressive")
+            _cfg.SETTINGS.AGGRESSIVE_TEST_MODE = (data == "cmd_aggressive_on")
+            new = get_control_state(uid, "aggressive")
+            title = _t(uid, "ctrl_aggressive") or "Aggressive Test Mode"
+            await query.edit_message_text(
+                render_change_confirmation(title, prev, new, uid=uid),
+                parse_mode="Markdown",
+                reply_markup=back_keyboard())
+
+    # --- Risk / daily-loss-limit submenu (state-visibility standard) ---
     elif data == "menu_risk":
-        await query.edit_message_text("🎯 Set Daily Loss Limit", reply_markup=risk_keyboard())
+        from ui_state import get_control_state, render_setting_menu
+        from i18n import t as _t
+        import panel as _panel
+        st = get_control_state(uid, "daily_loss")
+        title = _t(uid, "ctrl_daily_loss") or "Daily Loss Limit"
+        await query.edit_message_text(
+            render_setting_menu(title, st, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=_panel.build_risk_presets_menu(uid))
 
     elif data.startswith("cmd_risk_"):
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "daily_loss")
         val = float(data.replace("cmd_risk_", ""))
         execute("UPDATE users SET daily_loss_limit=? WHERE user_id=?", (val, uid))
-        await query.edit_message_text(f"✅ Daily loss limit set to ${val:.0f}", reply_markup=back_keyboard())
+        new = get_control_state(uid, "daily_loss")
+        title = _t(uid, "ctrl_daily_loss") or "Daily Loss Limit"
+        await query.edit_message_text(
+            render_change_confirmation(title, prev, new, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
 
     # --- Sell Now ---
     elif data == "cmd_sellnow":
@@ -907,7 +1005,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Guards Set submenu ---
     elif data == "menu_guards_set":
-        await query.edit_message_text("📐 Set SL / TP / Trail\nTap one, then type the value:", reply_markup=guards_set_keyboard())
+        # State-visibility: show current manual guards for the user's primary
+        # pair so they know what they'd be replacing before tapping.
+        from ui_state import _section_bar
+        from storage import fetchall
+        try:
+            rows = fetchall(
+                "SELECT pair, sl_price, tp_price, trail_pct FROM manual_guards WHERE user_id=?",
+                (uid,))
+        except Exception:
+            rows = []
+        bar = _section_bar()
+        lines = [bar, "📐 *SL / TP / TRAIL*", bar, "", "*Current guards:*"]
+        if rows:
+            for (pair, sl, tp, tr) in rows:
+                parts = [f"`{pair}`"]
+                parts.append(f"SL=*{sl}*" if sl else "SL=_—_")
+                parts.append(f"TP=*{tp}*" if tp else "TP=_—_")
+                parts.append(f"Trail=*{tr}*" if tr else "Trail=_—_")
+                lines.append("  " + " · ".join(parts))
+        else:
+            lines.append("  _none_")
+        lines.append("")
+        lines.append("Tap one below, then type the value:")
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=guards_set_keyboard())
 
     elif data == "prompt_sl":
         PENDING_INPUT[uid] = {"type": "sl", "chat_id": chat_id}
@@ -923,7 +1046,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Cancel Guards submenu ---
     elif data == "menu_cancel":
-        await query.edit_message_text("❌ Cancel Guards", reply_markup=cancel_keyboard())
+        from ui_state import _section_bar
+        from storage import fetchall
+        try:
+            rows = fetchall(
+                "SELECT pair, sl_price, tp_price, trail_pct FROM manual_guards WHERE user_id=?",
+                (uid,))
+        except Exception:
+            rows = []
+        bar = _section_bar()
+        active = []
+        for (pair, sl, tp, tr) in (rows or []):
+            parts = []
+            if sl: parts.append(f"SL")
+            if tp: parts.append(f"TP")
+            if tr: parts.append(f"Trail")
+            if parts:
+                active.append(f"`{pair}` → " + ",".join(parts))
+        lines = [bar, "❌ *CANCEL GUARDS*", bar, "",
+                 "*Currently active:* " + (", ".join(active) if active else "_none_"),
+                 "",
+                 "Choose what to cancel:"]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=cancel_keyboard())
 
     elif data == "cmd_cancel_sl":
         clear_manual_guard(uid, SETTINGS.PAIR, "sl")
@@ -943,7 +1089,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Reporting submenu ---
     elif data == "menu_reporting":
-        await query.edit_message_text("📊 Reports", reply_markup=reporting_keyboard())
+        from ui_state import _section_bar, get_control_state
+        from storage import fetchone
+        try:
+            row = fetchone(
+                "SELECT COUNT(*), COALESCE(SUM(pnl),0) FROM trades "
+                "WHERE status='CLOSED' AND user_id=? AND ts_close >= ?",
+                (uid, int(__import__('time').time()) - 30*86400))
+            trades = int(row[0]) if row else 0
+            pnl = float(row[1]) if row and row[1] is not None else 0.0
+        except Exception:
+            trades, pnl = 0, 0.0
+        open_cnt = 0
+        try:
+            from storage import fetchone as _f
+            r = _f("SELECT COUNT(*) FROM trades WHERE status='OPEN' AND user_id=?", (uid,))
+            open_cnt = int(r[0]) if r else 0
+        except Exception:
+            pass
+        bar = _section_bar()
+        lines = [
+            bar, "📊 *REPORTS*", bar, "",
+            f"*Current*: {trades} closed trades (30d) · "
+            f"PnL *${pnl:+,.2f}* · {open_cnt} open",
+            "",
+            "Choose a report:",
+        ]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=reporting_keyboard())
 
     elif data == "cmd_positions":
         from reports import format_position_report
@@ -996,7 +1170,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Pairs submenu ---
     elif data == "menu_pairs":
-        await query.edit_message_text("🌐 Pair Management", reply_markup=pairs_keyboard())
+        from ui_state import _section_bar
+        from pair_manager import list_all_pairs, get_active_pairs
+        try:
+            all_pairs = list_all_pairs(user_id=uid) or []
+            active = get_active_pairs(uid) or []
+        except Exception:
+            all_pairs, active = [], []
+        bar = _section_bar()
+        active_str = ", ".join(p.split("/")[0] for p in active[:6]) if active else "—"
+        if len(active) > 6:
+            active_str += f" (+{len(active)-6})"
+        lines = [
+            bar, "🌐 *PAIR MANAGEMENT*", bar, "",
+            f"*Current watchlist*: {len(all_pairs)} pair(s) "
+            f"· *{len(active)}* active",
+            f"Active: `{active_str}`",
+            "",
+            "Choose an action:",
+        ]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=pairs_keyboard())
 
     elif data == "cmd_pairs":
         from pair_manager import list_all_pairs
@@ -1034,7 +1229,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Admin submenu ---
     elif data == "menu_admin":
-        await query.edit_message_text("🔧 Admin", reply_markup=admin_keyboard())
+        from ui_state import _section_bar, get_control_state
+        ks = get_control_state(uid, "killswitch")
+        ag = get_control_state(uid, "aggressive")
+        bar = _section_bar()
+        lines = [
+            bar, "🔧 *ADMIN*", bar, "",
+            f"*Current Kill Switch*: {ks['label']} {ks['glyph']}",
+            f"*Current Aggressive Mode*: {ag['label']} {ag['glyph']}",
+            "",
+            "Choose an admin action:",
+        ]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=admin_keyboard())
 
     elif data == "cmd_health":
         from validators import run_all_checks
@@ -1054,13 +1262,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await app.bot.send_message(chat_id=chat_id, text=txt, reply_markup=back_keyboard())
 
     elif data == "cmd_killswitch":
-        if admin_only(uid):
-            import config
-            config.SETTINGS.KILL_SWITCH = not config.SETTINGS.KILL_SWITCH
-            state = "🔴 ON (trading stopped)" if config.SETTINGS.KILL_SWITCH else "🟢 OFF (trading active)"
-            await query.edit_message_text(f"Kill Switch: {state}", reply_markup=back_keyboard())
+        # Admin-only → render the state-visible submenu, not a blind toggle.
+        # Actual toggle lives in cmd_killswitch_on / cmd_killswitch_off.
+        if not admin_only(uid):
+            from i18n import t as _t
+            await query.edit_message_text(
+                _t(uid, "ui_admin_only") or "Admin only.",
+                reply_markup=back_keyboard())
         else:
-            await query.edit_message_text("⛔ Not allowed.", reply_markup=back_keyboard())
+            from ui_state import get_control_state, render_setting_menu
+            from i18n import t as _t
+            import panel as _panel
+            st = get_control_state(uid, "killswitch")
+            title = _t(uid, "ctrl_killswitch") or "Kill Switch"
+            await query.edit_message_text(
+                render_setting_menu(title, st, uid=uid),
+                parse_mode="Markdown",
+                reply_markup=_panel.build_killswitch_menu(uid))
 
     elif data == "cmd_reconcile":
         if admin_only(uid):
@@ -1203,7 +1421,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Use /golive command to run the wizard", reply_markup=back_keyboard())
 
     elif data == "cmd_panic_stop":
-        await query.edit_message_text("Use /panic_stop command to confirm and execute", reply_markup=back_keyboard())
+        # Render current state + confirmation path (confirm_panic runs the action).
+        from ui_state import get_control_state, render_setting_menu
+        from i18n import t as _t
+        import panel as _panel
+        st = get_control_state(uid, "panic")
+        title = _t(uid, "ctrl_panic") or "Panic Stop"
+        # If already active, offer Release path; else go through confirm_panic.
+        if st.get("on"):
+            await query.edit_message_text(
+                render_setting_menu(title, st, uid=uid),
+                parse_mode="Markdown",
+                reply_markup=_panel.build_trading_actions_menu(uid))
+        else:
+            await query.edit_message_text(
+                render_setting_menu(title, st,
+                                    options_hint="⚠️ _This action closes all open positions._",
+                                    uid=uid),
+                parse_mode="Markdown",
+                reply_markup=_panel.build_confirm_menu(uid, "cmd_panic_stop_exec", "cmd_menu"))
+
+    elif data == "cmd_panic_stop_exec":
+        # Actual panic execution via the command handler's logic.
+        # Route to panic_stop_cmd by synthesizing an update-like call.
+        try:
+            await panic_stop_cmd(update, context)
+        except Exception as e:
+            log.debug("panic exec failed uid=%s: %s", uid, e)
+            await query.edit_message_text(
+                "Panic stop execution error. Try /panic_stop directly.",
+                reply_markup=back_keyboard())
 
     elif data == "cmd_backtest":
         await query.edit_message_text("Use: /backtest <pair> [days] [timeframe]\nExample: /backtest BTC/USD 30 1h",
@@ -1359,19 +1606,78 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Level-2 submenu routes (menu refactor §18.20) ---
     elif data == "menu_risk_v2":
+        # State-visibility standard: show all three risk dials + meaning
+        # before presenting submenu options.
+        from ui_state import get_control_state, _section_bar
+        from i18n import t as _t
         import panel as _panel
+        dl = get_control_state(uid, "daily_loss")
+        cap = get_control_state(uid, "capital")
+        mx = get_control_state(uid, "max_exposure")
+        bar = _section_bar()
+        cur = _t(uid, "ui_current") or "Current"
+        meaning = _t(uid, "ui_meaning") or "Meaning"
+        lines = [
+            bar, "🎯 *RISK*", bar, "",
+            f"{cur} Daily Loss: *{dl['label']}* {dl['glyph']}",
+            f"{cur} Capital: *{cap['label']}* {cap['glyph']}",
+            f"{cur} Max Exposure: *{mx['label']}* {mx['glyph']}",
+            f"{meaning}: _{dl['meaning_en']}_",
+            "",
+            _t(uid, "ui_choose_action") or "Choose an action:",
+        ]
         await query.edit_message_text(
-            "🎯 Risk", reply_markup=_panel.build_risk_menu(uid))
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=_panel.build_risk_menu(uid))
 
     elif data == "menu_ai":
+        # State-visibility: show the AI fusion policy and aggressive-mode
+        # status so the user knows what the signal layer is using.
+        from ui_state import _section_bar, get_control_state
         import panel as _panel
+        policy = getattr(SETTINGS, "AI_FUSION_POLICY", "local_only")
+        ag = get_control_state(uid, "aggressive")
+        bar = _section_bar()
+        lines = [
+            bar, "🧠 *AI & ANALYSIS*", bar, "",
+            f"*Current AI policy*: `{policy}`",
+            f"*Current Aggressive Mode*: {ag['label']} {ag['glyph']}",
+            "",
+            "Choose an action:",
+        ]
         await query.edit_message_text(
-            "🧠 AI / Analysis", reply_markup=_panel.build_ai_menu(uid))
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=_panel.build_ai_menu(uid))
 
     elif data == "menu_trial":
+        # State-visibility: show whether a trial is currently running.
+        from ui_state import _section_bar
         import panel as _panel
+        trial_line = "_no trial active_"
+        try:
+            import trial as _trial
+            if _trial.is_enabled():
+                ts = _trial.get_trial(uid)
+                if ts and ts.active:
+                    trial_line = (
+                        f"*Active* · day {ts.day_index}/{ts.target_days} · "
+                        f"capital *${ts.capital:,.0f}*")
+                else:
+                    trial_line = "_inactive (trial mode enabled, not started)_"
+            else:
+                trial_line = "_disabled (FEATURE\\_TRIAL\\_MODE=false)_"
+        except Exception:
+            pass
+        bar = _section_bar()
+        lines = [
+            bar, "🧪 *TRIAL MODE*", bar, "",
+            f"*Current trial*: {trial_line}",
+            "",
+            "Choose an action:",
+        ]
         await query.edit_message_text(
-            "🧪 Trial Mode", reply_markup=_panel.build_trial_menu(uid))
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=_panel.build_trial_menu(uid))
 
     elif data == "menu_account":
         # §18.24 — Account tile now renders the full per-user dashboard
@@ -1391,21 +1697,82 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👤 Account", reply_markup=_panel.build_account_menu(uid))
 
     elif data == "menu_preferences":
+        # State-visibility: expose the three per-user risk dials so users see
+        # their current stance before picking a new profile.
+        from ui_state import _section_bar, get_control_state
         import panel as _panel
+        cap = get_control_state(uid, "capital")
+        mx = get_control_state(uid, "max_exposure")
+        dl = get_control_state(uid, "daily_loss")
+        bar = _section_bar()
+        lines = [
+            bar, "⚙️ *PREFERENCES*", bar, "",
+            f"*Current Capital*: {cap['label']}",
+            f"*Current Max Exposure*: {mx['label']}",
+            f"*Current Daily Loss Limit*: {dl['label']}",
+            "",
+            "Choose a preset or action:",
+        ]
         await query.edit_message_text(
-            "⚙️ Preferences", reply_markup=_panel.build_preferences_menu(uid))
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=_panel.build_preferences_menu(uid))
 
     elif data == "menu_advanced":
+        # State-visibility: show killswitch + aggressive mode state in the
+        # header, since both live in Advanced and operators must see their
+        # current state before touching anything dangerous.
+        from ui_state import get_control_state, _section_bar
+        from i18n import t as _t
         import panel as _panel
+        ks = get_control_state(uid, "killswitch")
+        ag = get_control_state(uid, "aggressive")
+        bar = _section_bar()
+        cur = _t(uid, "ui_current") or "Current"
+        meaning = _t(uid, "ui_meaning") or "Meaning"
+        lines = [
+            bar, "🛠 *ADVANCED*", bar, "",
+            f"{cur} Kill Switch: *{ks['label']}* {ks['glyph']}",
+            f"{cur} Aggressive Mode: *{ag['label']}* {ag['glyph']}",
+            f"{meaning}: _{ag['meaning_en']}_",
+            "",
+            _t(uid, "ui_choose_action") or "Choose an action:",
+        ]
         await query.edit_message_text(
-            "🛠 Advanced", reply_markup=_panel.build_advanced_menu(uid))
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=_panel.build_advanced_menu(uid))
 
-    # Legacy menu_mode wrapper now includes trading actions (sell / panic / go_live)
-    # so users don't need to hunt for them on the main grid.
+    elif data == "menu_aggressive":
+        if not admin_only(uid):
+            from i18n import t as _t
+            await query.edit_message_text(
+                _t(uid, "ui_admin_only") or "Admin only.",
+                reply_markup=back_keyboard())
+        else:
+            from ui_state import get_control_state, render_setting_menu
+            from i18n import t as _t
+            import panel as _panel
+            st = get_control_state(uid, "aggressive")
+            title = _t(uid, "ctrl_aggressive") or "Aggressive Test Mode"
+            await query.edit_message_text(
+                render_setting_menu(title, st,
+                                    options_hint="_Signal gates only. Risk caps unchanged._",
+                                    uid=uid),
+                parse_mode="Markdown",
+                reply_markup=_panel.build_aggressive_menu(uid))
+
+    # Trading Mode submenu — exact UX spec: Current + Meaning + Switch/Keep.
+    # Trading actions (Sell Now, Panic, Go Live Wizard) intentionally NOT
+    # duplicated here; they live in Advanced + bottom ReplyKeyboard.
     elif data == "menu_mode":
+        from ui_state import get_control_state, render_setting_menu
+        from i18n import t as _t
         import panel as _panel
+        state = get_control_state(uid, "mode")
+        title = _t(uid, "ctrl_mode") or "Trading Mode"
         await query.edit_message_text(
-            "⚙️ Trading Mode", reply_markup=_panel.build_trading_actions_menu(uid))
+            render_setting_menu(title, state, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=_panel.build_mode_menu(uid))
 
     # --- Trial submenu actions (wire buttons to existing /trial subcommands) ---
     elif data == "cmd_trial_status":
@@ -1920,31 +2287,66 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_settings(context.application, update.effective_chat.id)
 
 async def autotrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """State-visibility standard: no-arg shows current state + menu.
+    With arg: shows Previous → New → Effect confirmation."""
     uid = update.effective_user.id
-    # Per-user flag — any user may toggle their own autotrade
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    import panel as _panel
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "autotrade")
+
+    # No args → render setting menu with current state + action buttons
     if not context.args:
-        await update.message.reply_text("Usage: /autotrade on|off")
+        title = _t(uid, "ctrl_autotrade") or "AutoTrade"
+        body = render_setting_menu(title, prev, uid=uid)
+        await update.message.reply_text(
+            body, parse_mode="Markdown",
+            reply_markup=_panel.build_autotrade_menu(uid))
         return
+
     val = 1 if context.args[0].lower() == "on" else 0
     execute("UPDATE users SET autotrade_enabled=? WHERE user_id=?", (val, uid))
-    await update.message.reply_text(f"Auto-Trade {'enabled' if val else 'disabled'}.", reply_markup=back_keyboard())
+    new_state = get_control_state(uid, "autotrade")
+    title = _t(uid, "ctrl_autotrade") or "AutoTrade"
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """State-visibility standard: no-arg shows current state + menu.
+    With arg: shows Previous → New → Effect confirmation. LIVE-gate checks
+    preserved (LIVE_TRADE_ALLOWED_IDS + per-user credentials)."""
     uid = update.effective_user.id
-    # Per-user setting — LIVE still gated by LIVE_TRADE_ALLOWED_IDS below
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    import panel as _panel
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "mode")
+
     if not context.args:
-        await update.message.reply_text("Usage: /mode paper|live")
+        title = _t(uid, "ctrl_mode") or "Trading Mode"
+        body = render_setting_menu(title, prev, uid=uid)
+        await update.message.reply_text(
+            body, parse_mode="Markdown",
+            reply_markup=_panel.build_trading_actions_menu(uid))
         return
+
     m = context.args[0].upper()
     if m not in ("PAPER", "LIVE"):
         await update.message.reply_text("Mode must be paper or live.")
         return
     if m == "LIVE":
         if uid not in (SETTINGS.LIVE_TRADE_ALLOWED_IDS or []):
-            await update.message.reply_text("Live mode requires approval. Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.")
+            await update.message.reply_text(
+                "⛔ Live mode requires approval.\n"
+                f"Current: {prev['label']} {prev['glyph']}\n"
+                "Ask an admin to add your ID to LIVE_TRADE_ALLOWED_IDS.")
             return
-        # Per-user credential gate (§18.25) — live trading must use the
-        # user's own exchange account, never the platform owner's.
+        # Per-user credential gate (§18.25)
         try:
             from storage import get_credential as _gc
             cred = _gc(uid, "ccxt")
@@ -1952,25 +2354,54 @@ async def mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cred = None
         if not cred:
             await update.message.reply_text(
-                "Live trading requires your own exchange connection. "
-                "Use /setkeys or 👤 Account → 🔌 Connect first."
-            )
+                f"⛔ Live trading requires your own exchange connection.\n"
+                f"Current: {prev['label']} {prev['glyph']}\n"
+                "Use /setkeys or 👤 Account → 🔌 Connect first.")
             return
     execute("UPDATE users SET trade_mode=? WHERE user_id=?", (m, uid))
-    await update.message.reply_text(f"Mode set to {m}.", reply_markup=back_keyboard())
+    new_state = get_control_state(uid, "mode")
+    title = _t(uid, "ctrl_mode") or "Trading Mode"
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """State-visibility standard: no-arg shows current daily-loss menu;
+    `/risk daily <usd>` shows Previous → New → Effect confirmation."""
     uid = update.effective_user.id
-    if not context.args or (len(context.args) < 2) or (context.args[0].lower() != "daily"):
-        await update.message.reply_text("Usage: /risk daily <usd>")
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    import panel as _panel
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "daily_loss")
+
+    if not context.args:
+        title = _t(uid, "ctrl_daily_loss") or "Daily Loss Limit"
+        body = render_setting_menu(title, prev,
+                                   options_hint="Pick a preset below or use /risk daily <usd>.",
+                                   uid=uid)
+        await update.message.reply_text(
+            body, parse_mode="Markdown",
+            reply_markup=_panel.build_risk_presets_menu(uid))
+        return
+    if (len(context.args) < 2) or (context.args[0].lower() != "daily"):
+        await update.message.reply_text(
+            f"Usage: /risk daily <usd>\nCurrent: {prev['label']} {prev['glyph']}")
         return
     try:
         val = float(context.args[1])
     except Exception:
-        await update.message.reply_text("Invalid number.")
+        await update.message.reply_text(_t(uid, "ui_invalid_value") or "Invalid number.")
         return
     execute("UPDATE users SET daily_loss_limit=? WHERE user_id=?", (val, uid))
-    await update.message.reply_text(f"Daily loss limit set to {val} USD.", reply_markup=back_keyboard())
+    new_state = get_control_state(uid, "daily_loss")
+    title = _t(uid, "ctrl_daily_loss") or "Daily Loss Limit"
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 async def sellnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -2095,47 +2526,65 @@ async def ranking_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), reply_markup=back_keyboard())
 
 async def capital_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """State-visibility standard for per-user capital (users.capital_usd)."""
     uid = update.effective_user.id
-    # Per-user capital — reads/writes users.capital_usd, NOT the global setting
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "capital")
+    title = _t(uid, "ctrl_capital") or "Capital"
+
     if not context.args:
-        row = fetchone("SELECT capital_usd FROM users WHERE user_id=?", (uid,))
-        cur = float(row[0]) if row and row[0] is not None else SETTINGS.CAPITAL_USD
-        await update.message.reply_text(
-            f"Your capital: ${cur:,.2f}\nUsage: /capital <amount>",
-            reply_markup=back_keyboard())
+        body = render_setting_menu(title, prev,
+                                   options_hint="Type `/capital <amount>` to change.",
+                                   uid=uid)
+        await update.message.reply_text(body, parse_mode="Markdown", reply_markup=back_keyboard())
         return
     try:
         val = float(context.args[0])
         if val <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Invalid amount.")
+        await update.message.reply_text(
+            f"{_t(uid, 'ui_invalid_value') or 'Invalid amount.'}\nCurrent: {prev['label']}")
         return
     execute("UPDATE users SET capital_usd=? WHERE user_id=?", (val, uid))
-    await update.message.reply_text(f"Your capital set to ${val:,.2f}", reply_markup=back_keyboard())
+    new_state = get_control_state(uid, "capital")
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 async def maxexposure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """State-visibility standard for max_portfolio_exposure (0..1)."""
     uid = update.effective_user.id
-    # Per-user max portfolio exposure — users.max_portfolio_exposure column
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "max_exposure")
+    title = _t(uid, "ctrl_max_exposure") or "Max Portfolio Exposure"
+
     if not context.args:
-        row = fetchone("SELECT max_portfolio_exposure FROM users WHERE user_id=?", (uid,))
-        pct = float(row[0]) if row and row[0] is not None else SETTINGS.MAX_PORTFOLIO_EXPOSURE
-        await update.message.reply_text(
-            f"Your max exposure: {pct*100:.0f}%\nUsage: /maxexposure <0.0-1.0>",
-            reply_markup=back_keyboard())
+        body = render_setting_menu(title, prev,
+                                   options_hint="Type `/maxexposure <0.0–1.0>` to change.",
+                                   uid=uid)
+        await update.message.reply_text(body, parse_mode="Markdown", reply_markup=back_keyboard())
         return
     try:
         val = float(context.args[0])
         if not 0 < val <= 1.0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Must be 0 < value <= 1.0")
+        await update.message.reply_text(
+            f"Must be 0 < value <= 1.0\nCurrent: {prev['label']}")
         return
     execute("UPDATE users SET max_portfolio_exposure=? WHERE user_id=?", (val, uid))
-    row = fetchone("SELECT capital_usd FROM users WHERE user_id=?", (uid,))
-    cap = float(row[0]) if row and row[0] is not None else SETTINGS.CAPITAL_USD
+    new_state = get_control_state(uid, "max_exposure")
     await update.message.reply_text(
-        f"Your max exposure: {val*100:.0f}% (${cap * val:,.2f})",
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
         reply_markup=back_keyboard())
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2179,19 +2628,93 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, reply_markup=back_keyboard())
 
 async def killswitch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only. No-arg → state-visible submenu. With `on|off` → direct set.
+    Toggle semantics preserved for backward compat if called without args
+    from the legacy code path."""
     uid = update.effective_user.id
     if not admin_only(uid):
-        await update.message.reply_text("Not allowed.")
+        from i18n import t as _t
+        await update.message.reply_text(_t(uid, "ui_admin_only") or "Admin only.")
         return
     import config
-    config.SETTINGS.KILL_SWITCH = not config.SETTINGS.KILL_SWITCH
-    state = "🔴 ON (trading stopped)" if config.SETTINGS.KILL_SWITCH else "🟢 OFF (trading active)"
-    await update.message.reply_text(f"Kill Switch: {state}", reply_markup=back_keyboard())
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    import panel as _panel
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "killswitch")
+
+    if not context.args:
+        title = _t(uid, "ctrl_killswitch") or "Kill Switch"
+        body = render_setting_menu(title, prev, uid=uid)
+        await update.message.reply_text(
+            body, parse_mode="Markdown",
+            reply_markup=_panel.build_killswitch_menu(uid))
+        return
+
+    arg = context.args[0].lower()
+    if arg == "on":
+        config.SETTINGS.KILL_SWITCH = True
+    elif arg == "off":
+        config.SETTINGS.KILL_SWITCH = False
+    else:
+        # Legacy toggle behaviour
+        config.SETTINGS.KILL_SWITCH = not config.SETTINGS.KILL_SWITCH
+
+    new_state = get_control_state(uid, "killswitch")
+    title = _t(uid, "ctrl_killswitch") or "Kill Switch"
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 async def blocked_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from reports import blocked_trades_summary
     days = int(context.args[0]) if context.args else 7
     await update.message.reply_text(blocked_trades_summary(days), reply_markup=back_keyboard())
+
+
+async def aggressive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only runtime toggle for SETTINGS.AGGRESSIVE_TEST_MODE.
+    Follows the state-visibility standard: no-arg → menu with current state;
+    `on|off` → Previous → New → Effect confirmation."""
+    uid = update.effective_user.id
+    if not admin_only(uid):
+        from i18n import t as _t
+        await update.message.reply_text(_t(uid, "ui_admin_only") or "Admin only.")
+        return
+    import config as _cfg
+    from ui_state import (get_control_state, render_setting_menu,
+                          render_change_confirmation)
+    import panel as _panel
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "aggressive")
+    title = _t(uid, "ctrl_aggressive") or "Aggressive Test Mode"
+
+    if not context.args:
+        hint = ("_Lowers signal-generation gates only. Risk caps, stop-loss, "
+                "exposure limits, drawdown halt are unchanged._")
+        body = render_setting_menu(title, prev, options_hint=hint, uid=uid)
+        await update.message.reply_text(
+            body, parse_mode="Markdown",
+            reply_markup=_panel.build_aggressive_menu(uid))
+        return
+
+    arg = context.args[0].lower()
+    if arg == "on":
+        _cfg.SETTINGS.AGGRESSIVE_TEST_MODE = True
+    elif arg == "off":
+        _cfg.SETTINGS.AGGRESSIVE_TEST_MODE = False
+    else:
+        await update.message.reply_text("Usage: /aggressive on|off")
+        return
+
+    new_state = get_control_state(uid, "aggressive")
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 
 async def setkeys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2545,15 +3068,19 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Emergency stop: disable trading + close all positions for this user."""
+    """Emergency stop: disable trading + close all positions for this user.
+    Follows the UX state-visibility standard: shows Previous → New → Effect
+    with the specific number of positions closed and PnL as part of the effect."""
     uid = update.effective_user.id
-    # Set panic_stop in user_settings
+    from ui_state import get_control_state, render_change_confirmation
+    from i18n import t as _t
+
+    prev = get_control_state(uid, "panic")
+
     from storage import upsert_user_settings
     upsert_user_settings(uid, panic_stop=1)
-    # Disable autotrade
     execute("UPDATE users SET autotrade_enabled=0 WHERE user_id=?", (uid,))
 
-    # Close all open trades for this user
     closed = 0
     total_pnl = 0.0
     try:
@@ -2568,15 +3095,20 @@ async def panic_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error("Panic stop close failed for user %d: %s", uid, e)
 
-    lines = [
-        "PANIC STOP ACTIVATED",
-        f"AutoTrade: DISABLED",
-        f"Positions closed: {closed}",
-        f"PnL: ${total_pnl:+.2f}" if closed > 0 else "",
-        "",
-        "To resume: re-enable autotrade and clear panic stop.",
-    ]
-    await update.message.reply_text("\n".join(l for l in lines if l), reply_markup=back_keyboard())
+    new_state = get_control_state(uid, "panic")
+    effect_parts = ["all trading blocked", "autotrade disabled"]
+    if closed > 0:
+        effect_parts.append(f"{closed} position(s) closed (PnL ${total_pnl:+.2f})")
+    else:
+        effect_parts.append("no open positions")
+    effect_override = "; ".join(effect_parts) + ". To resume: clear panic and re-enable autotrade."
+
+    title = _t(uid, "ctrl_panic") or "Panic Stop"
+    await update.message.reply_text(
+        render_change_confirmation(title, prev, new_state, uid=uid,
+                                   effect_override=effect_override),
+        parse_mode="Markdown",
+        reply_markup=back_keyboard())
 
 
 # ---------------------------
@@ -3143,6 +3675,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ai", rate_limited(ai_cmd)))
     app.add_handler(CommandHandler("killswitch", rate_limited(killswitch_cmd)))
     app.add_handler(CommandHandler("blocked", rate_limited(blocked_cmd)))
+    app.add_handler(CommandHandler("aggressive", rate_limited(aggressive_cmd)))
     app.add_handler(CommandHandler("capital", rate_limited(capital_cmd)))
     app.add_handler(CommandHandler("maxexposure", rate_limited(maxexposure_cmd)))
     app.add_handler(CommandHandler("divzones", rate_limited(divzones_cmd)))

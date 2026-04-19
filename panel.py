@@ -266,9 +266,11 @@ def build_advanced_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(_btn(uid, "btn_heatmap", "🔥 Heatmap"), callback_data="cmd_heatmap"),
          InlineKeyboardButton(_btn(uid, "btn_insights", "🧠 Insights"), callback_data="cmd_ai"),
          InlineKeyboardButton(_btn(uid, "btn_backtest", "📊 Backtest"), callback_data="cmd_backtest")],
-        # Row 4 — Visuals + admin
+        # Row 4 — Visuals + admin + aggressive-mode toggle
         [InlineKeyboardButton(_btn(uid, "btn_visuals", "🎨 Visuals"), callback_data="cmd_visuals"),
          InlineKeyboardButton(_btn(uid, "btn_admin", "🧩 Admin"), callback_data="menu_admin")],
+        [InlineKeyboardButton("🔥 Aggressive Mode ➤", callback_data="menu_aggressive"),
+         InlineKeyboardButton("🔴 Kill Switch ➤", callback_data="cmd_killswitch")],
         _back_row(uid),
     ])
 
@@ -360,13 +362,154 @@ def build_account_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
 
 
 def build_trading_actions_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
-    """Actions under Mode submenu — includes Sell Now (confirm) and Panic (confirm)."""
+    """Mode / sensitive-actions submenu — state-aware labels + explicit actions.
+    Follows the UX state-visibility standard: current state is the PRIMARY
+    message (rendered by telegram_bot via ui_state.render_setting_menu),
+    and every button describes the CONCRETE action (e.g. 'Switch to LIVE')
+    rather than a bare toggle."""
+    try:
+        from ui_state import get_control_state
+        mode_state = get_control_state(uid, "mode")
+        panic_state = get_control_state(uid, "panic")
+    except Exception:
+        mode_state = {"on": False, "label": "PAPER", "glyph": "🧪"}
+        panic_state = {"on": False, "label": "INACTIVE", "glyph": "🟢"}
+
+    # Mode row: explicit destination + glyph; "Keep" button is idempotent.
+    if mode_state.get("on"):
+        mode_row = [
+            InlineKeyboardButton("🧪 Switch to PAPER", callback_data="cmd_mode_paper"),
+            InlineKeyboardButton("✅ Keep LIVE 🔴", callback_data="cmd_menu"),
+        ]
+    else:
+        mode_row = [
+            InlineKeyboardButton("🔴 Switch to LIVE", callback_data="cmd_mode_live"),
+            InlineKeyboardButton("✅ Keep PAPER 🧪", callback_data="cmd_menu"),
+        ]
+
+    # Panic row: only one path — activate (with confirmation). Already-active
+    # renders a "Release panic" path instead.
+    if panic_state.get("on"):
+        panic_row = [
+            InlineKeyboardButton("🟢 Release Panic", callback_data="cmd_panic_release"),
+        ]
+    else:
+        panic_row = [
+            InlineKeyboardButton("🚨 Activate PANIC 🔴", callback_data="confirm_panic"),
+        ]
+
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_btn(uid, "btn_mode_paper", "📝 Paper Mode"), callback_data="cmd_mode_paper"),
-         InlineKeyboardButton(_btn(uid, "btn_mode_live", "🔴 Live Mode"), callback_data="cmd_mode_live")],
+        mode_row,
         [InlineKeyboardButton(_btn(uid, "btn_go_live", "🚀 Go Live Wizard"), callback_data="cmd_golive")],
-        [InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="confirm_sellnow"),
-         InlineKeyboardButton(_btn(uid, "btn_panic", "🚨 Panic Stop"), callback_data="confirm_panic")],
+        [InlineKeyboardButton(_btn(uid, "btn_sell_now", "🛑 Sell Now"), callback_data="confirm_sellnow")],
+        panic_row,
+        _back_row(uid),
+    ])
+
+
+def build_mode_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Mode-only submenu per UX spec — Switch / Keep rows.
+    Trading actions (Sell Now, Panic, Go Live Wizard) live elsewhere
+    (Advanced submenu + bottom ReplyKeyboard) and are intentionally not
+    duplicated here so the Mode menu stays focused on mode state only."""
+    try:
+        from ui_state import get_control_state
+        mode_state = get_control_state(uid, "mode")
+    except Exception:
+        mode_state = {"on": False, "label": "PAPER", "glyph": "🧪"}
+
+    if mode_state.get("on"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔁 Switch to PAPER 🧪", callback_data="cmd_mode_paper"),
+             InlineKeyboardButton("⚠️ Keep LIVE 🔴", callback_data="cmd_menu")],
+            _back_row(uid),
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Switch to LIVE 🔴", callback_data="cmd_mode_live"),
+         InlineKeyboardButton("✅ Keep PAPER 🧪", callback_data="cmd_menu")],
+        _back_row(uid),
+    ])
+
+
+def build_autotrade_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """State-aware AutoTrade submenu. Button text reflects the concrete action
+    available given the current state, not a generic ON/OFF pair."""
+    try:
+        from ui_state import get_control_state
+        state = get_control_state(uid, "autotrade")
+    except Exception:
+        state = {"on": False, "label": "OFF", "glyph": "🔴"}
+
+    if state.get("on"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⛔ Turn OFF 🔴", callback_data="cmd_autotrade_off"),
+             InlineKeyboardButton("✅ Keep ON 🟢", callback_data="cmd_menu")],
+            _back_row(uid),
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Turn ON 🟢", callback_data="cmd_autotrade_on"),
+         InlineKeyboardButton("❌ Keep OFF 🔴", callback_data="cmd_menu")],
+        _back_row(uid),
+    ])
+
+
+def build_aggressive_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """State-aware Aggressive Test Mode submenu. Admin-only action path."""
+    try:
+        from ui_state import get_control_state
+        state = get_control_state(uid, "aggressive")
+    except Exception:
+        state = {"on": False, "label": "OFF", "glyph": "🛡"}
+
+    if state.get("on"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛡 Switch to SAFE", callback_data="cmd_aggressive_off"),
+             InlineKeyboardButton("✅ Keep AGGRESSIVE 🔥", callback_data="cmd_menu")],
+            _back_row(uid),
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 Enable AGGRESSIVE", callback_data="cmd_aggressive_on"),
+         InlineKeyboardButton("✅ Keep SAFE 🛡", callback_data="cmd_menu")],
+        _back_row(uid),
+    ])
+
+
+def build_killswitch_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """State-aware Kill Switch submenu. Admin-only action path."""
+    try:
+        from ui_state import get_control_state
+        state = get_control_state(uid, "killswitch")
+    except Exception:
+        state = {"on": False, "label": "OFF", "glyph": "🟢"}
+
+    if state.get("on"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 Release Kill Switch", callback_data="cmd_killswitch_off"),
+             InlineKeyboardButton("🔴 Keep Active", callback_data="cmd_menu")],
+            _back_row(uid),
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Engage Kill Switch", callback_data="cmd_killswitch_on"),
+         InlineKeyboardButton("🟢 Keep Active", callback_data="cmd_menu")],
+        _back_row(uid),
+    ])
+
+
+def build_risk_presets_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    """State-aware daily-loss-limit presets. Current preset is marked with ✓."""
+    try:
+        from ui_state import get_control_state
+        cur = float(get_control_state(uid, "daily_loss").get("raw", 0) or 0)
+    except Exception:
+        cur = 0.0
+
+    def _mk(v: float) -> InlineKeyboardButton:
+        mark = "✓ " if abs(cur - v) < 0.01 else ""
+        return InlineKeyboardButton(f"{mark}${int(v)}", callback_data=f"cmd_risk_{int(v)}")
+
+    return InlineKeyboardMarkup([
+        [_mk(25), _mk(50), _mk(100)],
+        [_mk(200), _mk(500)],
         _back_row(uid),
     ])
 

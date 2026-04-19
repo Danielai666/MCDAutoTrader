@@ -334,6 +334,46 @@ TEXT = {
         "seconds_ago": "ago",
         "not_allowed": "Not allowed.",
         "unknown_command": "Unknown command.",
+
+        # --- UX state-visibility standard (ui_state.py) ---
+        "ui_current": "Current",
+        "ui_meaning": "Meaning",
+        "ui_previous": "Previous",
+        "ui_new": "New",
+        "ui_effect": "Effect",
+        "ui_updated": "updated",
+        "ui_choose_action": "Choose an action:",
+        "ui_keep_current": "Keep current",
+        "ui_turn_on": "Turn ON",
+        "ui_turn_off": "Turn OFF",
+        "ui_activate": "Activate",
+        "ui_deactivate": "Deactivate",
+        "ui_switch_to": "Switch to",
+        "ui_unchanged_short": "No change",
+        "ui_admin_only": "Admin only.",
+        "ui_invalid_value": "Invalid value.",
+
+        # Control-menu titles
+        "ctrl_autotrade": "AutoTrade",
+        "ctrl_panic": "Panic Stop",
+        "ctrl_mode": "Trading Mode",
+        "ctrl_killswitch": "Kill Switch",
+        "ctrl_aggressive": "Aggressive Test Mode",
+        "ctrl_daily_loss": "Daily Loss Limit",
+        "ctrl_capital": "Capital",
+        "ctrl_max_exposure": "Max Portfolio Exposure",
+
+        # State meanings (used by ui_state._state_*)
+        "state_meaning_autotrade_on": "bot can open trades automatically",
+        "state_meaning_autotrade_off": "autonomous trading is disabled",
+        "state_meaning_panic_active": "all trading blocked; open positions were closed",
+        "state_meaning_panic_inactive": "trading permitted; no emergency brake",
+        "state_meaning_mode_live": "real trades are placed on your connected exchange",
+        "state_meaning_mode_paper": "simulated trading only; no real funds at risk",
+        "state_meaning_killswitch_on": "global kill switch engaged — ALL users are blocked",
+        "state_meaning_killswitch_off": "global trading is permitted (subject to per-user guards)",
+        "state_meaning_aggressive_on": "signal gates lowered — more entries, risk caps unchanged",
+        "state_meaning_aggressive_off": "safe signal gates active — conservative filtering",
     },
 
     "fa": {
@@ -634,6 +674,46 @@ TEXT = {
         "seconds_ago": "قبل",
         "not_allowed": "مجاز نیست.",
         "unknown_command": "دستور ناشناخته.",
+
+        # --- UX state-visibility standard ---
+        "ui_current": "وضعیت فعلی",
+        "ui_meaning": "معنی",
+        "ui_previous": "قبلی",
+        "ui_new": "جدید",
+        "ui_effect": "اثر",
+        "ui_updated": "به‌روزرسانی شد",
+        "ui_choose_action": "یک اقدام را انتخاب کنید:",
+        "ui_keep_current": "حفظ وضعیت فعلی",
+        "ui_turn_on": "روشن کن",
+        "ui_turn_off": "خاموش کن",
+        "ui_activate": "فعال کن",
+        "ui_deactivate": "غیرفعال کن",
+        "ui_switch_to": "تغییر به",
+        "ui_unchanged_short": "بدون تغییر",
+        "ui_admin_only": "فقط مدیر.",
+        "ui_invalid_value": "مقدار نامعتبر.",
+
+        # Control-menu titles
+        "ctrl_autotrade": "معامله‌ی خودکار",
+        "ctrl_panic": "توقف اضطراری",
+        "ctrl_mode": "حالت معاملاتی",
+        "ctrl_killswitch": "کلید توقف کلی",
+        "ctrl_aggressive": "حالت تهاجمی آزمایشی",
+        "ctrl_daily_loss": "سقف ضرر روزانه",
+        "ctrl_capital": "سرمایه",
+        "ctrl_max_exposure": "حداکثر مواجهه پورتفو",
+
+        # State meanings
+        "state_meaning_autotrade_on": "ربات می‌تواند به‌طور خودکار معامله باز کند",
+        "state_meaning_autotrade_off": "معامله‌ی خودکار غیرفعال است",
+        "state_meaning_panic_active": "کل معاملات مسدود و موقعیت‌ها بسته شدند",
+        "state_meaning_panic_inactive": "معامله مجاز است؛ ترمز اضطراری فعال نیست",
+        "state_meaning_mode_live": "معاملات واقعی روی صرافی متصل شما انجام می‌شود",
+        "state_meaning_mode_paper": "فقط شبیه‌سازی؛ هیچ سرمایه‌ی واقعی در ریسک نیست",
+        "state_meaning_killswitch_on": "کلید توقف کلی فعال — همه کاربران مسدودند",
+        "state_meaning_killswitch_off": "معاملات کلی مجاز است (محدودیت‌های هر کاربر اعمال می‌شود)",
+        "state_meaning_aggressive_on": "آستانه‌های سیگنال پایین‌تر — ورودهای بیشتر، سقف ریسک تغییر نکرده",
+        "state_meaning_aggressive_off": "آستانه‌های امن فعال — فیلتر محافظه‌کارانه",
     },
 }
 
