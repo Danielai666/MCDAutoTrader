@@ -1476,9 +1476,146 @@ Still cache-only — never triggers a live fetch from the panel itself.
 
 **Commit:** `4bd333b`.
 
+### 18.28 Signal dispatch hook — wire `panel.track_last_signal` into scheduler (2026-04-18)
+
+Deferred from §20 item #6. The control panel header's "Last Signal" line stayed `—` in production because nothing was calling `panel.track_last_signal`. The panel infrastructure was in place since §18.9 but no caller populated the in-memory dict.
+
+**Implementation:**
+- New helper `_record_user_signal(uid, user_results)` in `scheduler.py`. Picks the most salient signal from a user's analyzed pairs:
+  1. Highest-conviction ENTER/EXIT by `confidence × |merged_score|`
+  2. Otherwise, strongest non-HOLD `merged_direction` by `|merged_score|`
+- Two call sites:
+  - Top of `_execute_autonomous_cycle_for_user` — runs before mode/panic gates so every autotrade user gets `Last Signal` populated regardless of `ai_mode` (signal_only / manual_confirm / ai_full).
+  - Non-auto broadcast loop in `run_cycle_once` — builds a user-specific `user_results` slice from the shared `market_data` dict via `get_active_pairs(uid)`, so signal-only users also see their Last Signal.
+- Best-effort: never raises, never blocks the cycle. Side-effect-only writes to an in-memory dict.
+
+**Verification:** 6 runtime cases (ENTER-SELL, all-HOLD strongest, EXIT, empty, malformed, glyph rendering). 66/66 tests pass. Zero impact on strategy, risk, execution, or DB layers.
+
+**Commit:** `3ee60b0`.
+
+### 18.29 AGGRESSIVE_TEST_MODE — controlled threshold relaxation (fix for 4-day zero-trade drought)
+
+**Problem:** The production bot went 4 consecutive days without executing a single trade. `ai_decisions` table showed 81 rows clustered at conf `0.51–0.58` (HOLDs) with sporadic ENTERs pinned at exactly `0.65`. Empty `signals` and `blocked_trades` tables confirmed decisions were falling short of the AI confidence gate without ever reaching the risk engine.
+
+**Root cause:** Five compounding filters produced a mathematical deadlock. The most severe was the AI confidence formula itself.
+
+| # | File:Line | Gate | Current | Why it blocks |
+|---|---|---|---|---|
+| A | `strategy.py:54-59` | `cur_adx < ADX_TREND_MIN` → HOLD, skips all 12 scoring components | `20.0` | Low-volatility periods drop 30m/1h ADX below 20 routinely |
+| B | `strategy.py:199-200` | Per-TF score ≥ `1.2` | hard-coded `1.2` | Needs 3–4 confluence components per TF |
+| C | `strategy.py:299-300` (merge_mtf) | `\|m\| > 0.4` to set merged_direction | hard-coded `0.4` | Single-TF dominance (1+1.5 vs 2) → m=0.444, borderline |
+| **D** | `ai_fusion.py:266,269` | `sc > SIGNAL_SCORE_MIN AND conf ≥ AI_CONFIDENCE_MIN` | `0.60` / `0.65` | **Base conf = 0.50 + \|m\|×0.15. Max reachable conf = 0.65 only at merged_score=1.0 (perfect MTF alignment). Any adverse modulation (weak ADX, BB/RSI extreme) drops below 0.65 instantly.** |
+| E | `risk.py:290-295` (should_skip_weak_setup) | `setup_quality < 0.30 OR flags > 2 OR conf < 0.65` | 0.30 / 2 / 0.65 | Duplicate conf gate; setup_quality = \|score\|/2 matches Gate D ceiling |
+
+Gate D is the primary bug — the bot was **mathematically incapable** of clearing the confidence gate without perfect alignment.
+
+**Fix:** Single env flag `AGGRESSIVE_TEST_MODE` + 7 tunable override values. 7 accessor helpers in `config.py` return the AGGRESSIVE_* values when the flag is on, safe defaults otherwise. 8 call sites now route through the accessors — strategy.py ADX filter, per-TF threshold, merge_mtf threshold; ai_fusion.py `_local_heuristic` decision gate; risk.py `should_skip_weak_setup` (all 3 gates) + `confidence_scaled_position_size` anchor.
+
+| Threshold | Safe default | Aggressive default | Env override |
+|---|---|---|---|
+| AI_CONFIDENCE_MIN | 0.65 | **0.48** | `AGGRESSIVE_AI_CONFIDENCE_MIN` |
+| SIGNAL_SCORE_MIN | 0.60 | **0.35** | `AGGRESSIVE_SIGNAL_SCORE_MIN` |
+| MIN_SETUP_QUALITY | 0.30 | **0.15** | `AGGRESSIVE_MIN_SETUP_QUALITY` |
+| ADX_TREND_MIN | 20.0 | **12.0** | `AGGRESSIVE_ADX_TREND_MIN` |
+| MAX_RISK_FLAGS | 2 | **3** | `AGGRESSIVE_MAX_RISK_FLAGS` |
+| TF score threshold | 1.2 | **0.8** | `AGGRESSIVE_TF_SCORE_MIN` |
+| MTF merge threshold | 0.4 | **0.25** | `AGGRESSIVE_MTF_MERGE_THRESHOLD` |
+
+**Safety — NOT touched:** stop-loss multiplier (`ATR_SL_MULTIPLIER=1.5`), take-profit (`TP_ATR_MULTIPLIER=2.0`), max open trades per user (`2`), max daily trades (`10`), daily loss limit (`$50`), portfolio exposure cap (`50%`), drawdown halt (`25%`), cooldown (`300s`), consecutive-loss pause, duplicate-trade guard, correlation guard, kill switch, panic stop, event-risk gate, ownership-model guards (§18.25).
+
+**Activation:**
+- Set `AGGRESSIVE_TEST_MODE=true` on Railway → redeploy.
+- `validators.run_all_checks` now prints `!!! [AGGRESSIVE_TEST_MODE] conf_min=0.48 score_min=0.35 …` banner on startup.
+- AI decision reasons append `"AGGRESSIVE_TEST_MODE active"` on every fired signal for audit trail.
+- Runtime toggle also available via `/aggressive on|off` (admin-only; mutates `SETTINGS.AGGRESSIVE_TEST_MODE` at runtime like `/killswitch`).
+
+**Verification (11 runtime assertions):** safe mode behavior identical to before (borderline merged=0.5 ADX=26 signal still HOLDs at conf=0.57); aggressive mode fires that same signal as ENTER BUY; truly weak signals (merged=0.20) still HOLD in aggressive mode (gate isn't bypassed, just lowered); stop-loss/TP math unchanged; all 6 risk caps numerically unchanged. 66/66 tests pass.
+
+**Expected impact:** Signal generation ~3–5× increase. Trade frequency from 0/day sustained to 1–3/day typical (capped by `MAX_DAILY_TRADES=10` and `MAX_OPEN_TRADES=2`). Win rate expected to decline modestly (lower-conviction entries admitted). Per-trade max risk unchanged at `$20` per user.
+
+**Commit:** `fb75299`.
+
+### 18.30 UX state-visibility standard — Current / Meaning / Effect pattern
+
+**Problem:** Toggle menus showed only action options (`AutoTrade ON`, `AutoTrade OFF`, `Paper Mode`, `Live Mode`) without indicating the *current* state. Users had to guess which was active before tapping — unacceptable for a trading control system.
+
+**System-wide UX rule established:**
+1. Every control must render *current state* before showing *available actions*.
+2. Pre-change menu uses label **`Meaning:`** — explains what the current state does right now.
+3. Post-change confirmation uses label **`Effect:`** — explains what just happened.
+4. Button text represents the **action** (`Turn OFF`, `Switch to LIVE`, `Engage Kill Switch`), never a bare state (`ON`, `OFF`, `Paper Mode`).
+
+**New module `ui_state.py` (~340 LOC):**
+Three reusable renderers:
+- `render_current_state(title, state)` — compact status block for embedding
+- `render_setting_menu(title, state, options_hint)` — full pre-change body (`Meaning:`)
+- `render_change_confirmation(title, previous, new, effect_override)` — post-change body (`Effect:`)
+
+Central `CONTROLS` registry with 8 introspectors: `autotrade`, `panic`, `mode`, `killswitch`, `aggressive`, `daily_loss`, `capital`, `max_exposure`. Each returns a canonical dict `{raw, on, label, glyph, icon, meaning_en, effect_on_en, effect_off_en}`. Handlers never read `user_settings` / `users` / `SETTINGS` directly for UX text anymore.
+
+`SECTION_ICON` per control: 🤖 AutoTrade, 🚨 Panic, ⚙️ Mode, 🔴 Kill Switch, 🔥 Aggressive, 🎯 Daily Loss, 💰 Capital, 📈 Max Exposure.
+
+**State-aware keyboards in `panel.py`:**
+- `build_autotrade_menu(uid)` — `[✅ Turn ON 🟢] [❌ Keep OFF 🔴]` / `[⛔ Turn OFF 🔴] [✅ Keep ON 🟢]`
+- `build_mode_menu(uid)` — narrow Mode-only: `[🔁 Switch to LIVE 🔴] [✅ Keep PAPER 🧪]` / inverse
+- `build_aggressive_menu(uid)` — admin-only, `[🔥 Enable AGGRESSIVE] [✅ Keep SAFE 🛡]` / inverse
+- `build_killswitch_menu(uid)` — admin-only, `[🔴 Engage] [🟢 Keep Active]` / inverse
+- `build_risk_presets_menu(uid)` — daily-loss presets, current value marked with ✓
+
+**New commands + callbacks:**
+- `/aggressive [on|off]` — admin-only runtime toggle (mutates `SETTINGS.AGGRESSIVE_TEST_MODE`)
+- `cmd_killswitch_on` / `cmd_killswitch_off` (explicit, replacing blind toggle)
+- `cmd_aggressive_on` / `cmd_aggressive_off`
+- `cmd_panic_release` (clears `user_settings.panic_stop` without re-enabling autotrade)
+- `cmd_panic_stop_exec` (separates state display from panic execution)
+
+**`Current:` + `Meaning:` header blocks added to 15 menus** — every submenu that previously rendered only a bare title now leads with live state:
+`menu_autotrade`, `menu_mode` (narrow, exact spec), `menu_risk`, `menu_risk_v2`, `menu_advanced`, `menu_aggressive`, `menu_ai`, `menu_trial`, `menu_preferences`, `menu_pairs`, `menu_admin`, `menu_reporting`, `menu_cancel`, `menu_guards_set`. (`menu_account` already compliant since §18.24.)
+
+**Command handlers rewired:** `/autotrade`, `/mode`, `/risk`, `/capital`, `/maxexposure`, `/panic_stop`, `/killswitch`, `/aggressive` — all follow the 4-line pattern:
+```python
+prev = get_control_state(uid, "control")
+# ... mutate DB or SETTINGS ...
+new = get_control_state(uid, "control")
+await reply(render_change_confirmation(title, prev, new, uid=uid))
+```
+
+**Dead code removed:** `autotrade_keyboard()`, `mode_keyboard()`, `risk_keyboard()` in `telegram_bot.py`. Replaced by the panel state-aware builders.
+
+**i18n:** 35 new keys in both EN and FA — `ui_current`, `ui_meaning`, `ui_previous`, `ui_new`, `ui_effect`, `ui_updated`, `ui_choose_action`, `ui_admin_only`, `ctrl_*` titles, `state_meaning_*` strings. Every renderer output is translatable.
+
+**Safety preserved:** no trading / risk / execution / signal / DB logic touched. LIVE-mode gates (`LIVE_TRADE_ALLOWED_IDS` + per-user credentials) preserved. Panic confirmation flow preserved (`confirm_panic` → `cmd_panic_stop_exec`). All existing `callback_data` values still resolve — zero handler renames.
+
+**Live example — AutoTrade menu (state OFF):**
+```
+━━━━━━━━━━━━━━━━━━━━
+🤖 AUTOTRADE
+━━━━━━━━━━━━━━━━━━━━
+
+Current: OFF 🔴
+Meaning: autonomous trading is disabled
+
+Choose an action:
+```
+Buttons: `[✅ Turn ON 🟢] [❌ Keep OFF 🔴]` · `[⬅️ Back] [🏠 Main Menu]`
+
+**Post-change (after turning ON):**
+```
+━━━━━━━━━━━━━━━━━━━━
+✅ AutoTrade updated
+━━━━━━━━━━━━━━━━━━━━
+Previous: OFF 🔴
+New: ON 🟢
+Effect: bot is now allowed to execute trades
+```
+
+**Verification:** 9 runtime demos covering every control + every keyboard variant. 66/66 tests pass. Old button labels (`AutoTrade ON/OFF`, `Paper Mode`, `Live Mode`) grep-verified absent from all keyboard surfaces. Dead keyboard functions confirmed removed.
+
+**Commits:** `a226179`.
+
 ---
 
-## 19. Current State Snapshot (2026-04-15 — end of Session 2)
+## 19. Current State Snapshot (2026-04-18 — end of Session 3)
 
 | Area | State |
 |---|---|
@@ -1488,20 +1625,24 @@ Still cache-only — never triggers a live fetch from the panel itself.
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `4bd333b` (Portfolio UX polish — visual dashboard, insight footer, refresh button) |
-| `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel (Status/Signal/Positions · Report/Auto/Mode · Risk/Pairs/Account · Price/Health/Advanced) + 8 L2 submenus (including Advanced with 11 power-user actions) + category previews in header + dual-nav footers + confirmation flows + persistent bottom ReplyKeyboard (Menu·Status·Panic Stop) + exchange-connection indicator |
+| Latest commit | `a226179` (UX state-visibility standard — Current/Meaning/Effect pattern everywhere) |
+| Session 3 highlights | Fixed 4-day zero-trade drought (AGGRESSIVE_TEST_MODE), wired signal dispatch hook, shipped system-wide UX state-visibility standard |
+| `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel; every submenu now leads with `Current:` + `Meaning:` state block (§18.30) |
+| `AGGRESSIVE_TEST_MODE` | `false` by default — code deployed. Flip to `true` on Railway to activate controlled threshold relaxation (§18.29). Runtime toggle via `/aggressive on\|off` or ⚙️ Advanced → 🔥 Aggressive Mode (admin-only). |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
-| `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready) |
+| `FEATURE_I18N` | `false` (user-toggled; English only; Farsi translations ready incl. 35 new UX keys) |
 | `FEATURE_PORTFOLIO` | `false` (user-toggled; `/portfolio` replies "disabled") |
 | `FEATURE_SCREENSHOTS` | `true` |
 | `FEATURE_AI_FUSION` | `false` |
 | `FEATURE_HIDDEN_DIVERGENCE` | `true` (used by strategy trigger path) |
 | `FEATURE_ICHIMOKU` | `true` |
 | `FEATURE_MT5_BRIDGE` | `false` |
-| Multi-user state | Personal commands ungated; 2 tenant-leak bugs fixed; admin gate retained on killswitch/reconcile/health_stats only |
+| UX standard | `ui_state.py` is single source of truth. 8-control registry (autotrade, panic, mode, killswitch, aggressive, daily_loss, capital, max_exposure). Three canonical renderers (`render_current_state`, `render_setting_menu`, `render_change_confirmation`). 15 menus now show `Current:` + `Meaning:` before any action button. |
+| Signal-header hook | `panel.track_last_signal` now wired into both autotrade and signal-only dispatch paths (§18.28). Main-panel "Last Signal" line populates automatically on every cycle. |
+| Multi-user state | Personal commands ungated; 2 tenant-leak bugs fixed; admin gate retained on killswitch/reconcile/health_stats/aggressive only |
 | Safety layer | Dual-window rate limit (5/10s burst + 10/60s volume); active-user cap (24h + autotrade); exchange-error wrapper on ALL user paths; light telemetry (users, cpm) in `/health_stats` |
-| Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser`, `v1.3-pre-menu-refactor` + branches `backup/pre-ui-panel`, `backup/pre-multiuser`, `backup/pre-menu-refactor` (all on GitHub) |
-| Open deferrals | Exit optimization (ATR-unit reconciliation); signal dispatch → `panel.track_last_signal` wiring; additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; persistent rate-limit (Redis/DB) if needed at scale |
+| Restore anchors | Tags `v1.0-rc1`, `v1.1-pre-ui-panel`, `v1.2-pre-multiuser`, `v1.3-pre-menu-refactor`, **`v1.4-pre-big-changes`** + branches `backup/pre-ui-panel`, `backup/pre-multiuser`, `backup/pre-menu-refactor`, **`backup/pre-big-changes`** (all on GitHub) |
+| Open deferrals | Exit optimization (ATR-unit reconciliation); additional Settings items (timezone, notifications, trial toggle); full structured-logging rollout via `logging_utils.py`; persistent rate-limit (Redis/DB) if needed at scale |
 | Open security TODO | Rotate Supabase password, Telegram token, Fernet key, OpenAI key after burn-in |
 | Tests | 66 still passing via `.venv/bin/python3.9 -m unittest discover tests -v` (pytest not installed) |
 
@@ -1509,19 +1650,15 @@ Still cache-only — never triggers a live fetch from the panel itself.
 
 ## 20. Immediate Next Steps
 
-1. **Observe Phase 2 tuning live** — watch trade frequency and PF over several days of paper trading. Collect: trades/day, win rate, PF, avg R, % of trades fired by TRIGGER vs score path.
-2. **If under-trading persists:** consider loosening ADX filter upper bound (45 → 50) or hidden-div bar (0.75 → 0.70).
-3. **If over-trading / PF drops:** raise non-trigger threshold back toward 1.3–1.4 before touching the trigger itself.
-4. **Exit optimization phase** — after §18.5 results are clear, reopen discussion on trailing / break-even / partial TP using **ATR-multiple units** (not R-multiples; 1 R = 1.5 ATR in this system).
-5. **Security rotation sweep** once burn-in passes (Supabase PW, Telegram token, Fernet key, OpenAI key).
-6. **Panel polish (low priority):**
-   - Wire `panel.track_last_signal(uid, direction, score, conf)` into the scheduler's signal dispatch so the header's `Last Signal` line populates automatically (currently stays `—` until a signal is recorded by a caller).
-   - Full button-label translation is now done (§18.12) — when `FEATURE_I18N` is re-enabled, the entire grid + bottom ReplyKeyboard + Settings submenu all localize.
-7. **Trial Mode readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_TRIAL_MODE=true` on Railway. `/trial start 1000` begins a 14-day paper run.
-8. **i18n readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_I18N=true`. Then `/lang fa` or tap ⚙️ Settings → 🇮🇷 فارسی for instant Farsi UI across panel header + all buttons + bottom ReplyKeyboard.
-9. **Portfolio readiness:** feature fully implemented and deployed but flag-gated off. To activate: set `FEATURE_PORTFOLIO=true`. Commands: `/portfolio` for live snapshot, `/portfolio report 7d|30d|<days>` for local-trades PnL, `/portfolio report real [days]` for exchange fetch_my_trades PnL (approximate). Read-only guarantees audited in code.
-10. **Three dormant features, one active tuning observation:** all recent feature work (Trial, i18n, Portfolio) is deployed but flagged off at user's request. Flip any single flag to `true` on Railway to activate without code changes.
-11. **Multi-user live (§18.15):** personal commands are now open to all users (`/autotrade`, `/mode`, `/sellnow`, `/capital`, `/maxexposure`, `/liveready`). Two pre-existing tenant-leak bugs in the trading path were fixed. LIVE mode still requires the user's Telegram ID to be in `LIVE_TRADE_ALLOWED_IDS`.
-12. **Production safety (§18.16):** dual-window rate limit (5/10s burst + 10/60s volume), `MAX_ACTIVE_USERS=20` soft cap (new users over cap forced to paper), clean exchange-error wrapper on portfolio paths. All tunable via Railway env.
-13. **Safety layer complete (§18.17):** `_safe_exchange_error` now covers ALL user-facing exchange paths (price, setkeys, connect, portfolio). Active-user cap uses 24h-interaction + autotrade definition. Light telemetry (total/active users, commands/min) exposed in `/health_stats`. Remaining deferral: persistent rate-limit (Redis/DB) if scaling past ~50 concurrent users; full `logging_utils.py` structured-logging rollout across all modules.
+1. **Activate AGGRESSIVE_TEST_MODE on Railway** if the zero-trade drought is still occurring after deploy. Single env flip: `AGGRESSIVE_TEST_MODE=true` → redeploy. Startup log will print `!!! [AGGRESSIVE_TEST_MODE] …` banner. Monitor trade frequency for 24–48h; expected ~3–5× signal increase, 1–3 trades/day capped by `MAX_DAILY_TRADES=10` and `MAX_OPEN_TRADES=2`.
+2. **Tune aggressive thresholds** individually if needed — 7 env overrides (`AGGRESSIVE_AI_CONFIDENCE_MIN`, `AGGRESSIVE_SIGNAL_SCORE_MIN`, `AGGRESSIVE_MIN_SETUP_QUALITY`, `AGGRESSIVE_ADX_TREND_MIN`, `AGGRESSIVE_MAX_RISK_FLAGS`, `AGGRESSIVE_TF_SCORE_MIN`, `AGGRESSIVE_MTF_MERGE_THRESHOLD`). No code changes required.
+3. **Observe UX in production** — the Current/Meaning/Effect pattern now renders on every submenu. Verify on Telegram after Railway redeploy that Mode, AutoTrade, Panic, Risk all show the new headers.
+4. **Big changes coming** — per user notice 2026-04-18, major refactor/feature work is scheduled. Restore anchor `v1.4-pre-big-changes` + branch `backup/pre-big-changes` captured immediately before that work begins. Full rollback path: `git reset --hard v1.4-pre-big-changes && git push origin main --force-with-lease`.
+5. **Exit optimization phase** — still deferred. Reopen discussion on trailing / break-even / partial TP using **ATR-multiple units** (not R-multiples; 1 R = 1.5 ATR in this system).
+6. **Security rotation sweep** once burn-in passes (Supabase PW, Telegram token, Fernet key, OpenAI key).
+7. **Trial Mode readiness:** feature fully implemented, flag-gated off. Activate: `FEATURE_TRIAL_MODE=true`. `/trial start 1000` begins a 14-day paper run.
+8. **i18n readiness:** feature fully implemented, flag-gated off. Activate: `FEATURE_I18N=true`. All 35 new UX state-visibility keys translated to Farsi.
+9. **Portfolio readiness:** feature fully implemented, flag-gated off. Activate: `FEATURE_PORTFOLIO=true`. Commands: `/portfolio`, `/portfolio report [7d|30d|<days>]`, `/portfolio report real [days]`, `/portfolio history [days]`, `/portfolio asset <SYMBOL>`.
+10. **Multi-user live (§18.15):** personal commands open to all users. LIVE mode still requires `LIVE_TRADE_ALLOWED_IDS` + per-user exchange credentials (§18.25 ownership model).
+11. **Uncommitted landing page work** (`landing/index.html`, `package.json`, `package-lock.json`, `node_modules/`) — prior session's Supabase-auth signup funnel, status unknown. NOT captured in `v1.4-pre-big-changes` (untracked). If keeping, commit separately before big changes begin.
 
