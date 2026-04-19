@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from config import SETTINGS
+from config import SETTINGS, get_ai_confidence_min, get_signal_score_min
 from storage import execute
 
 log = logging.getLogger(__name__)
@@ -260,15 +260,19 @@ def _local_heuristic(features: dict) -> AIDecision:
 
     conf = max(0.0, min(1.0, conf))
 
-    # Decision
+    # Decision — thresholds honour AGGRESSIVE_TEST_MODE
+    score_min = get_signal_score_min()
+    conf_min = get_ai_confidence_min()
     action = 'HOLD'
     side = None
-    if d == 'BUY' and sc > SETTINGS.SIGNAL_SCORE_MIN and conf >= SETTINGS.AI_CONFIDENCE_MIN:
+    if d == 'BUY' and sc > score_min and conf >= conf_min:
         action = 'ENTER'; side = 'BUY'
-        reasons.append(f'Score {sc:.2f} > {SETTINGS.SIGNAL_SCORE_MIN}')
-    elif d == 'SELL' and sc < -SETTINGS.SIGNAL_SCORE_MIN and conf >= SETTINGS.AI_CONFIDENCE_MIN:
+        reasons.append(f'Score {sc:.2f} > {score_min}')
+    elif d == 'SELL' and sc < -score_min and conf >= conf_min:
         action = 'EXIT'; side = 'SELL'
-        reasons.append(f'Score {sc:.2f} < -{SETTINGS.SIGNAL_SCORE_MIN}')
+        reasons.append(f'Score {sc:.2f} < -{score_min}')
+    if SETTINGS.AGGRESSIVE_TEST_MODE and action != 'HOLD':
+        reasons.append('AGGRESSIVE_TEST_MODE active')
 
     return AIDecision(
         action=action, side=side, confidence=conf,

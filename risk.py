@@ -4,7 +4,8 @@
 import time
 import json
 import logging
-from config import SETTINGS
+from config import (SETTINGS, get_ai_confidence_min, get_setup_quality_min,
+                    get_max_risk_flags)
 from storage import fetchall, fetchone, execute, upsert_bot_state
 
 log = logging.getLogger(__name__)
@@ -262,8 +263,12 @@ def confidence_scaled_position_size(price: float, atr_value: float,
     if atr_value <= 0 or price <= 0:
         return 0.0
     base_qty = position_size(price, atr_value, ctx)
-    conf_range = max(0.01, 1.0 - SETTINGS.AI_CONFIDENCE_MIN)
-    conf_normalized = max(0, min(1, (confidence - SETTINGS.AI_CONFIDENCE_MIN) / conf_range))
+    # Anchor confidence-scaling curve on the active threshold so aggressive
+    # mode scales smoothly across its widened range (0.48 → 1.0) instead of
+    # pinning everything at CONFIDENCE_SCALE_MIN.
+    active_conf_min = get_ai_confidence_min()
+    conf_range = max(0.01, 1.0 - active_conf_min)
+    conf_normalized = max(0, min(1, (confidence - active_conf_min) / conf_range))
     conf_factor = SETTINGS.CONFIDENCE_SCALE_MIN + conf_normalized * (SETTINGS.CONFIDENCE_SCALE_MAX - SETTINGS.CONFIDENCE_SCALE_MIN)
     quality_bonus = min(1.2, 1.0 + setup_quality * 0.2)
     if dd_scale is None:
@@ -286,13 +291,20 @@ def confidence_scaled_position_size(price: float, atr_value: float,
 # Setup quality filter
 # -------------------------------------------------------------------
 def should_skip_weak_setup(setup_quality: float, risk_flags: list, confidence: float) -> tuple:
-    """Returns (should_skip, reason)."""
-    if setup_quality < SETTINGS.MIN_SETUP_QUALITY:
-        return True, f'Quality {setup_quality:.2f} < {SETTINGS.MIN_SETUP_QUALITY}'
-    if len(risk_flags) > SETTINGS.MAX_RISK_FLAGS:
-        return True, f'{len(risk_flags)} risk flags > max {SETTINGS.MAX_RISK_FLAGS}'
-    if confidence < SETTINGS.AI_CONFIDENCE_MIN:
-        return True, f'Confidence {confidence:.2f} < {SETTINGS.AI_CONFIDENCE_MIN}'
+    """Returns (should_skip, reason). Thresholds honour AGGRESSIVE_TEST_MODE.
+
+    Gate structure is preserved identically in both modes — only numeric
+    floors shift. All three checks still run; none are bypassed.
+    """
+    quality_min = get_setup_quality_min()
+    flags_max = get_max_risk_flags()
+    conf_min = get_ai_confidence_min()
+    if setup_quality < quality_min:
+        return True, f'Quality {setup_quality:.2f} < {quality_min}'
+    if len(risk_flags) > flags_max:
+        return True, f'{len(risk_flags)} risk flags > max {flags_max}'
+    if confidence < conf_min:
+        return True, f'Confidence {confidence:.2f} < {conf_min}'
     return False, 'OK'
 
 # -------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from config import SETTINGS
+from config import SETTINGS, get_adx_trend_min, get_tf_score_min, get_mtf_merge_threshold
 from indicators import macd, rsi, stochastic, ema_pair, vol_ma, atr, adx, bollinger
 from divergence import detect_divergence, detect_hidden_divergence
 
@@ -50,10 +50,13 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
         pass
 
     # --- ADX trend filter ---
+    # Honours AGGRESSIVE_TEST_MODE: lowered floor (default 12.0) admits
+    # low-volatility setups so the 12-component scoring can still evaluate.
     cur_adx = float(adx_line.iloc[-1])
-    if cur_adx < SETTINGS.ADX_TREND_MIN:
+    adx_floor = get_adx_trend_min()
+    if cur_adx < adx_floor:
         return _build_result(
-            'HOLD', 0, f'ADX {cur_adx:.1f} < {SETTINGS.ADX_TREND_MIN} (choppy)',
+            'HOLD', 0, f'ADX {cur_adx:.1f} < {adx_floor} (choppy)',
             close, mline, r, k, d, e9, e21, a, adx_line, bb_up, bb_lo,
             candle_summary, regime_result, radar_zones=radar_zones
         )
@@ -193,11 +196,13 @@ def tf_signal(df: pd.DataFrame, symbol: str = '', timeframe: str = '') -> dict:
         except Exception:
             pass
 
-    # --- direction decision (threshold 1.2, non-trigger path) ---
+    # --- direction decision (non-trigger path) ---
+    # Threshold is 1.2 by default, lowered via AGGRESSIVE_TEST_MODE (default 0.8).
     direction = 'HOLD'
     score = buy_score - sell_score
-    if buy_score >= 1.2 and buy_score > sell_score: direction = 'BUY'
-    elif sell_score >= 1.2 and sell_score > buy_score: direction = 'SELL'
+    tf_threshold = get_tf_score_min()
+    if buy_score >= tf_threshold and buy_score > sell_score: direction = 'BUY'
+    elif sell_score >= tf_threshold and sell_score > buy_score: direction = 'SELL'
 
     # --- Strong divergence trigger (only overrides HOLD, never flips direction) ---
     # Regular divergence >= 0.65 OR hidden divergence >= 0.75, with candle
@@ -295,9 +300,11 @@ def merge_mtf(signals: dict) -> dict:
         v = 1 if sig.get('direction') == 'BUY' else -1 if sig.get('direction') == 'SELL' else 0
         s += v * w.get(tf, 1.0); wsum += w.get(tf, 1.0)
     m = s / wsum if wsum else 0.0
+    # Merged-direction threshold: 0.4 by default, lowered via AGGRESSIVE_TEST_MODE (default 0.25).
+    merge_threshold = get_mtf_merge_threshold()
     md = 'HOLD'
-    if m > 0.4: md = 'BUY'
-    if m < -0.4: md = 'SELL'
+    if m > merge_threshold: md = 'BUY'
+    if m < -merge_threshold: md = 'SELL'
     if regime == 'SELL' and md == 'BUY': md = 'HOLD'
     if regime == 'BUY' and md == 'SELL': md = 'HOLD'
 

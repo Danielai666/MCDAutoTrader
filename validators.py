@@ -101,6 +101,13 @@ def run_all_checks(settings) -> str:
     lines.append(f'AutoExit: {"ON" if settings.ENABLE_EXIT_AUTOMATION else "OFF"}')
     lines.append(f'Kill Switch: {"ON" if settings.KILL_SWITCH else "OFF"}')
     lines.append(f'AI Policy: {settings.AI_FUSION_POLICY}')
+    try:
+        from config import aggressive_mode_banner
+        banner = aggressive_mode_banner()
+        if banner:
+            lines.append(f'!!! {banner}')
+    except Exception:
+        pass
     lines.append('')
 
     # Config checks
