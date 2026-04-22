@@ -7,7 +7,7 @@
 > Total: 44 Python files, ~12,600 LOC (adds panel.py, i18n.py, trial.py, portfolio.py)
 > Tests: 66 automated tests, all passing
 > Release: v1.0-rc1 (feature freeze) · v1.1-pre-ui-panel · v1.2-pre-multiuser. Live on Railway + Supabase.
-> Latest commit: `4bd333b` (Portfolio UX polish — visual dashboard layout, insight footer, refresh button)
+> Latest commit: `6a47ef3` (Daily Loss Limit — ✏️ Custom Amount input for non-preset values)
 >
 > Active feature flags (live):
 >   FEATURE_CONTROL_PANEL=true    — modern inline panel + live dashboard (§18.9, §18.10)
@@ -1613,6 +1613,31 @@ Effect: bot is now allowed to execute trades
 
 **Commits:** `a226179`.
 
+### 18.31 Daily Loss Limit — ✏️ Custom Amount input (2026-04-22)
+
+**Problem:** The Daily Loss Limit menu showed only preset buttons (`$25 / $50 / $100 / $200 / $500`). Any user whose desired limit fell outside those values — e.g. `$75`, `$150`, `$1000` — had no way to set it from the panel. They either had to accept a preset or type `/risk daily <usd>` by hand. Additionally, when a user's stored value was a non-preset amount (set via `/risk daily`), the menu rendered no ✓ anywhere, giving no visual cue that the current state even matched a control.
+
+**Implementation:**
+- `panel.build_risk_presets_menu`: new `✏️ Custom Amount…` row below the presets with callback `prompt_risk_custom`. When the stored `daily_loss_limit` isn't one of the five presets, the ✓ marker moves to the Custom row so the user immediately sees that their current limit is a custom amount.
+- `telegram_bot.py` (button_callback): new `prompt_risk_custom` handler arms `PENDING_INPUT[uid] = {"type": "risk_daily", ...}` and prompts with the localized `enter_risk_daily` string.
+- `telegram_bot.py` (text_input_handler): new `ptype == "risk_daily"` branch validates `val > 0`, updates `users.daily_loss_limit`, then renders the same `render_change_confirmation(prev, new)` block that the preset buttons use — preserves the §18.30 Previous/New/Effect UX standard.
+- `i18n.py`: `enter_risk_daily` and `btn_custom_amount` keys in EN + FA.
+
+**Flow (current = $75, none of the presets):**
+```
+[$25] [$50] [$100]
+[$200] [$500]
+[✓ ✏️ Custom Amount…]
+[⬅️ Back] [🏠 Main Menu]
+```
+Tap Custom → *"Enter daily loss limit (USD), e.g. 75:"* → user types number → same confirmation card as preset buttons.
+
+**Safety:** no risk, execution, or signal logic touched. The only DB mutation is the same `UPDATE users SET daily_loss_limit=?` query the preset buttons already use. Validation (`val > 0`) matches the existing `cmd_risk_<n>` path (presets are all positive ints so no prior guard was needed).
+
+**Verification:** 66/66 tests pass. Imports clean (`.venv/bin/python3.9 -c "import panel, telegram_bot, i18n"`). Keyboard render confirmed via runtime probe (`panel.build_risk_presets_menu(None)` emits 4 rows: presets × 2, custom, back).
+
+**Commit:** `6a47ef3`.
+
 ---
 
 ## 19. Current State Snapshot (2026-04-18 — end of Session 3)
@@ -1625,8 +1650,8 @@ Effect: bot is now allowed to execute trades
 | Pairs | `BTC/USD, ETH/USD, SOL/USD` on Kraken |
 | AI fusion | `local_only` (Claude/OpenAI keys present, not consulted for trade decisions) |
 | Vision | Enabled for `/analyze_screens`, advisory only, isolated from trade path |
-| Latest commit | `a226179` (UX state-visibility standard — Current/Meaning/Effect pattern everywhere) |
-| Session 3 highlights | Fixed 4-day zero-trade drought (AGGRESSIVE_TEST_MODE), wired signal dispatch hook, shipped system-wide UX state-visibility standard |
+| Latest commit | `6a47ef3` (Daily Loss Limit — ✏️ Custom Amount input for non-preset values, §18.31) |
+| Session 3 highlights | Fixed 4-day zero-trade drought (AGGRESSIVE_TEST_MODE), wired signal dispatch hook, shipped system-wide UX state-visibility standard, added Custom Amount input on Daily Loss Limit |
 | `FEATURE_CONTROL_PANEL` | `true` — Clean 4×3 main panel; every submenu now leads with `Current:` + `Meaning:` state block (§18.30) |
 | `AGGRESSIVE_TEST_MODE` | `false` by default — code deployed. Flip to `true` on Railway to activate controlled threshold relaxation (§18.29). Runtime toggle via `/aggressive on\|off` or ⚙️ Advanced → 🔥 Aggressive Mode (admin-only). |
 | `FEATURE_TRIAL_MODE` | `false` (user-toggled; code deployed, no-op) |
