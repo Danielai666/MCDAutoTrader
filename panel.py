@@ -496,20 +496,28 @@ def build_killswitch_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
 
 
 def build_risk_presets_menu(uid: Optional[int] = None) -> InlineKeyboardMarkup:
-    """State-aware daily-loss-limit presets. Current preset is marked with ✓."""
+    """State-aware daily-loss-limit presets. Current preset is marked with ✓.
+    Also exposes a ✏️ Custom row so users can enter any dollar amount when
+    none of the presets match their desired limit."""
     try:
         from ui_state import get_control_state
         cur = float(get_control_state(uid, "daily_loss").get("raw", 0) or 0)
     except Exception:
         cur = 0.0
 
+    presets = (25, 50, 100, 200, 500)
+    is_custom = cur > 0 and not any(abs(cur - p) < 0.01 for p in presets)
+
     def _mk(v: float) -> InlineKeyboardButton:
         mark = "✓ " if abs(cur - v) < 0.01 else ""
         return InlineKeyboardButton(f"{mark}${int(v)}", callback_data=f"cmd_risk_{int(v)}")
 
+    custom_mark = "✓ " if is_custom else ""
+    custom_label = _btn(uid, "btn_custom_amount", "✏️ Custom Amount…")
     return InlineKeyboardMarkup([
         [_mk(25), _mk(50), _mk(100)],
         [_mk(200), _mk(500)],
+        [InlineKeyboardButton(f"{custom_mark}{custom_label}", callback_data="prompt_risk_custom")],
         _back_row(uid),
     ])
 

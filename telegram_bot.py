@@ -1898,6 +1898,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         PENDING_INPUT[uid] = {"type": "trial_start", "chat_id": chat_id}
         await query.edit_message_text(_t(uid, "enter_trial_capital"), reply_markup=back_keyboard())
 
+    elif data == "prompt_risk_custom":
+        from i18n import t as _t
+        PENDING_INPUT[uid] = {"type": "risk_daily", "chat_id": chat_id}
+        await query.edit_message_text(
+            _t(uid, "enter_risk_daily") or "Enter daily loss limit (USD), e.g. 75:",
+            reply_markup=back_keyboard())
+
     # --- Confirmation prompts for sensitive actions ---
     elif data == "confirm_sellnow":
         from i18n import t as _t
@@ -2142,6 +2149,20 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         execute("UPDATE users SET max_portfolio_exposure=? WHERE user_id=?", (val, uid))
         await update.message.reply_text(f"✅ Max exposure set to {val*100:.0f}%", reply_markup=back_keyboard())
+    elif ptype == "risk_daily":
+        if val <= 0:
+            await update.message.reply_text("❌ Daily loss limit must be positive.", reply_markup=back_keyboard())
+            return
+        from ui_state import get_control_state, render_change_confirmation
+        from i18n import t as _t
+        prev = get_control_state(uid, "daily_loss")
+        execute("UPDATE users SET daily_loss_limit=? WHERE user_id=?", (val, uid))
+        new = get_control_state(uid, "daily_loss")
+        title = _t(uid, "ctrl_daily_loss") or "Daily Loss Limit"
+        await update.message.reply_text(
+            render_change_confirmation(title, prev, new, uid=uid),
+            parse_mode="Markdown",
+            reply_markup=back_keyboard())
     elif ptype == "trial_start":
         if val <= 0:
             await update.message.reply_text("❌ Trial capital must be positive.", reply_markup=back_keyboard())

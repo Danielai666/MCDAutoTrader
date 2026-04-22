@@ -170,6 +170,8 @@ TEXT = {
         "enter_capital": "Enter capital amount (USD):",
         "enter_maxexposure": "Enter max exposure (0.0–1.0, e.g. 0.4 for 40%):",
         "enter_trial_capital": "Enter trial capital (USD), e.g. 1000:",
+        "enter_risk_daily": "Enter daily loss limit (USD), e.g. 75:",
+        "btn_custom_amount": "✏️ Custom Amount…",
 
         # --- Menu discoverability pass (§18.21) ---
         "btn_home": "🏠 Main Menu",
@@ -510,6 +512,8 @@ TEXT = {
         "enter_capital": "مقدار سرمایه (USD) را وارد کنید:",
         "enter_maxexposure": "حداکثر ریسک (0.0–1.0، مثلا 0.4 برای 40%):",
         "enter_trial_capital": "سرمایه آزمایشی (USD)، مثلا 1000:",
+        "enter_risk_daily": "حد ضرر روزانه (USD) را وارد کنید، مثلا 75:",
+        "btn_custom_amount": "✏️ مقدار دلخواه…",
 
         # --- Menu discoverability pass (Farsi) ---
         "btn_home": "🏠 منو اصلی",
